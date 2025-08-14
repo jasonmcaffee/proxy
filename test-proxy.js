@@ -47,3 +47,4 @@ console.log('- Unknown domains should fallback to NextJS target');
 console.log('\n💡 Make sure your proxy service is running on port 80');
 console.log('💡 Make sure your backend services are running on ports 8080 and 8081');
 
+
