@@ -7,7 +7,7 @@ import * as url from 'url';
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
 
-  private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8080';
+  private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
   private readonly nestjsTarget = process.env.NESTJS_TARGET || 'http://localhost:8081';
 
   /**

@@ -14,7 +14,7 @@ const url = require("url");
 let ProxyService = ProxyService_1 = class ProxyService {
     constructor() {
         this.logger = new common_1.Logger(ProxyService_1.name);
-        this.nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8080';
+        this.nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
         this.nestjsTarget = process.env.NESTJS_TARGET || 'http://localhost:8081';
     }
     getTargetUrl(host) {
