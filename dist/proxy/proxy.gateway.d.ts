@@ -1,11 +1,10 @@
-import { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit } from '@nestjs/websockets';
+import { OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-export declare class ProxyGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+export declare class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     server: Server;
     private readonly logger;
-    afterInit(server: Server): void;
-    handleConnection(client: Socket, ...args: any[]): void;
+    private readonly backendUrl;
+    checkBackendHealth(): Promise<boolean>;
+    handleConnection(client: Socket): Promise<void>;
     handleDisconnect(client: Socket): void;
-    handlePing(client: Socket, payload: any): void;
-    handleMessage(client: Socket, payload: any): void;
 }
