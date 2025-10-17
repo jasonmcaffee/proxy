@@ -15,7 +15,8 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 ### Domain Routing
 
 - **ai.jasonmcaffee.com** → `localhost:8081` (NestJS server)
-- **jasonmcaffee.com** (and all other subdomains except ai.*) → `localhost:8080` (Next.js server)
+- **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
+- **jasonmcaffee.com** (and all other subdomains) → `localhost:8080` (Next.js server)
 
 ## Technical Approach
 
@@ -34,6 +35,8 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 ```typescript
 if (host === 'ai.jasonmcaffee.com') {
   // Forward to localhost:8081 (NestJS)
+} else if (host === 'plex.jasonmcaffee.com') {
+  // Forward to localhost:32400 (Plex)
 } else if (host.endsWith('jasonmcaffee.com')) {
   // Forward to localhost:8080 (Next.js)
 } else {
@@ -85,11 +88,13 @@ proxy/
 PORT=80                      # Port for proxy service (requires root/admin)
 NEXTJS_TARGET=http://localhost:8080
 NESTJS_TARGET=http://localhost:8081
+PLEX_TARGET=http://localhost:32400
 ```
 
 ### Proxy Targets
 - **Next.js Server**: `http://localhost:8080`
 - **NestJS Server**: `http://localhost:8081`
+- **Plex Media Server**: `http://localhost:32400`
 
 ## Features
 
@@ -163,6 +168,9 @@ Test the proxy with:
 ```bash
 # Test ai.jasonmcaffee.com routing
 curl -H "Host: ai.jasonmcaffee.com" http://localhost/
+
+# Test plex.jasonmcaffee.com routing
+curl -H "Host: plex.jasonmcaffee.com" http://localhost/
 
 # Test jasonmcaffee.com routing
 curl -H "Host: jasonmcaffee.com" http://localhost/

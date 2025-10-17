@@ -16,10 +16,14 @@ let ProxyService = ProxyService_1 = class ProxyService {
         this.logger = new common_1.Logger(ProxyService_1.name);
         this.nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
         this.nestjsTarget = process.env.NESTJS_TARGET || 'http://localhost:8081';
+        this.plexTarget = process.env.PLEX_TARGET || 'http://localhost:32400';
     }
     getTargetUrl(host) {
         if (host === 'ai.jasonmcaffee.com') {
             return this.nestjsTarget;
+        }
+        else if (host === 'plex.jasonmcaffee.com') {
+            return this.plexTarget;
         }
         else if (host.endsWith('jasonmcaffee.com')) {
             return this.nextjsTarget;
@@ -35,17 +39,29 @@ let ProxyService = ProxyService_1 = class ProxyService {
         const targetUrl = this.getTargetUrl(host);
         const targetUrlObj = url.parse(targetUrl);
         this.logger.log(`📥 ${req.method} ${req.url} (${host}) → ${targetUrl}`);
+        const isPlex = host === 'plex.jasonmcaffee.com';
+        const headers = { ...req.headers };
+        if (isPlex) {
+            const localAddress = `${targetUrlObj.hostname}:${targetUrlObj.port}`;
+            headers.host = localAddress;
+            headers.referer = `http://${localAddress}`;
+            headers.origin = `http://${localAddress}`;
+            headers['x-forwarded-for'] = '127.0.0.1';
+            headers['x-real-ip'] = '127.0.0.1';
+            headers['x-forwarded-proto'] = 'http';
+            delete headers['x-forwarded-host'];
+        }
+        else {
+            headers['x-forwarded-for'] = req.ip || req.connection.remoteAddress;
+            headers['x-forwarded-proto'] = req.protocol;
+            headers['x-forwarded-host'] = host;
+        }
         const options = {
             hostname: targetUrlObj.hostname,
             port: parseInt(targetUrlObj.port || '80', 10),
             path: req.url,
             method: req.method,
-            headers: {
-                ...req.headers,
-                'x-forwarded-for': req.ip || req.connection.remoteAddress,
-                'x-forwarded-proto': req.protocol,
-                'x-forwarded-host': host,
-            },
+            headers,
         };
         const proxyReq = http.request(options, (proxyRes) => {
             this.logger.log(`📤 ${req.method} ${req.url} (${host}) ← ${proxyRes.statusCode}`);
