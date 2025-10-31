@@ -62,8 +62,11 @@ export class ProxyService {
 
           // Handle request body - if it has been parsed by middleware, re-stringify it
           // This is necessary because parsed bodies need to be sent as strings over HTTP
-          if (req.body && !Buffer.isBuffer(req.body) && typeof req.body !== 'string') {
-            const contentType = req.headers['content-type'] || 'application/json';
+          // EXCEPT for multipart/form-data, which must be streamed as-is
+          const contentType = req.headers['content-type'] || '';
+          const isMultipart = contentType.includes('multipart/form-data');
+          
+          if (!isMultipart && req.body && !Buffer.isBuffer(req.body) && typeof req.body !== 'string') {
             let bodyData: string;
             
             if (contentType.includes('application/json')) {
@@ -76,7 +79,7 @@ export class ProxyService {
             proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
             proxyReq.write(bodyData);
           }
-          // If body is a string, Buffer, or hasn't been parsed, 
+          // If body is multipart/form-data, string, Buffer, or hasn't been parsed, 
           // http-proxy-middleware will automatically handle it via streaming
         },
         onProxyRes: (proxyRes, req: any) => {
