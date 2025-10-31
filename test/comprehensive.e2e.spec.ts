@@ -1,4 +1,6 @@
 import * as http from 'http';
+import * as fs from 'fs';
+import * as path from 'path';
 // Import socket.io-client using require to avoid type issues
 const { io } = require('socket.io-client');
 type Socket = any;
@@ -95,18 +97,42 @@ describe('Comprehensive Proxy Tests', () => {
 
   describe('Binary POST Request', () => {
     it('should successfully proxy binary POST request', async () => {
-      return new Promise<void>((resolve, reject) => {
-        const binaryData = Buffer.from('RIFF....WEBM....fake audio data', 'utf-8');
+      // Read the converted webm file from fixtures
+      const fixtureDir = path.join(__dirname, 'fixtures');
+      const webmPath = path.join(fixtureDir, 'hello where is canada.webm');
+      
+      if (!fs.existsSync(webmPath)) {
+        throw new Error(`Converted webm file not found. Expected: ${webmPath}. Please run: ffmpeg -i "test/fixtures/hello where is canada.m4a" -c:a libopus -b:a 128k "test/fixtures/hello where is canada.webm"`);
+      }
 
+      // Read the binary webm file
+      const binaryData = fs.readFileSync(webmPath);
+
+      // Create multipart/form-data body matching the browser request format
+      const boundary = 'geckoformboundarya77b88892ae962218bb68b18ab8144';
+      const formData = [
+        `------${boundary}\r\n`,
+        `Content-Disposition: form-data; name="file"; filename="blob"\r\n`,
+        `Content-Type: audio/webm;codecs=opus\r\n`,
+        `\r\n`,
+        binaryData,
+        `\r\n------${boundary}--\r\n`
+      ];
+      
+      const bodyBuffer = Buffer.concat(
+        formData.map(part => typeof part === 'string' ? Buffer.from(part, 'utf-8') : part)
+      );
+
+      return new Promise<void>((resolve, reject) => {
         const options = {
           hostname: PROXY_HOST,
           port: PROXY_PORT,
-          path: '/speech-audio/test',
+          path: '/speech-audio/speechToText',
           method: 'POST',
           headers: {
             'Host': 'ai.jasonmcaffee.com',
-            'Content-Type': 'audio/webm;codecs=opus',
-            'Content-Length': binaryData.length,
+            'Content-Type': `multipart/form-data; boundary=----${boundary}`,
+            'Content-Length': bodyBuffer.length,
             'User-Agent': 'ComprehensiveTest/1.0'
           }
         };
@@ -125,12 +151,12 @@ describe('Comprehensive Proxy Tests', () => {
           reject(err);
         });
 
-        req.setTimeout(5000, () => {
+        req.setTimeout(30000, () => {
           req.destroy();
           reject(new Error('Timeout'));
         });
 
-        req.write(binaryData);
+        req.write(bodyBuffer);
         req.end();
       });
     });

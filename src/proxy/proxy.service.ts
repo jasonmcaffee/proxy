@@ -40,6 +40,8 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
+        timeout: 30000, // 30 second timeout
+        proxyTimeout: 30000,
         onProxyReq: (proxyReq, req: any) => {
           if (isPlex) {
             // Plex-specific header modifications
@@ -57,6 +59,25 @@ export class ProxyService {
             proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
             proxyReq.setHeader('x-forwarded-host', host);
           }
+
+          // Handle request body - if it has been parsed by middleware, re-stringify it
+          // This is necessary because parsed bodies need to be sent as strings over HTTP
+          if (req.body && !Buffer.isBuffer(req.body) && typeof req.body !== 'string') {
+            const contentType = req.headers['content-type'] || 'application/json';
+            let bodyData: string;
+            
+            if (contentType.includes('application/json')) {
+              bodyData = JSON.stringify(req.body);
+            } else {
+              bodyData = String(req.body);
+            }
+            
+            proxyReq.setHeader('Content-Type', contentType);
+            proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+            proxyReq.write(bodyData);
+          }
+          // If body is a string, Buffer, or hasn't been parsed, 
+          // http-proxy-middleware will automatically handle it via streaming
         },
         onProxyRes: (proxyRes, req: any) => {
           this.logger.log(`📤 ${req.method} ${req.url} (${host}) ← ${proxyRes.statusCode}`);
