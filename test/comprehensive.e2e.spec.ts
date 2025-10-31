@@ -196,7 +196,7 @@ describe('Comprehensive Proxy Tests', () => {
           // Send streamInference request matching the client
           const request = {
             prompt: 'Say hello',
-            conversationId: null,
+            conversationId: '32ba3b64-d2cc-4079-b93e-bfd95b4efaab',
             shouldSearchWeb: false,
             shouldUsePlanTool: false,
             shouldRespondWithAudio: false,
