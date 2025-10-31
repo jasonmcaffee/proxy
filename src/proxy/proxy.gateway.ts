@@ -3,9 +3,6 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
-  SubscribeMessage,
-  MessageBody,
-  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
@@ -125,27 +122,6 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.data.pendingMessages.push({ event, payload: args });
       }
     });
-  }
-
-  @SubscribeMessage('streamInference')
-  handleStreamInference(
-    @MessageBody() data: any,
-    @ConnectedSocket() client: Socket,
-  ): void {
-    const clientId = client.id;
-    this.logger.log(`Received streamInference from client ${clientId}`);
-
-    const backendSocket = client.data.backendSocket;
-    if (backendSocket && backendSocket.connected && client.data.backendConnected) {
-      this.logger.log(`Forwarding streamInference to backend for client ${clientId}`);
-      backendSocket.emit('streamInference', data);
-    } else {
-      this.logger.log(`Backend not connected yet for client ${clientId}, queueing streamInference`);
-      if (!client.data.pendingMessages) {
-        client.data.pendingMessages = [];
-      }
-      client.data.pendingMessages.push({ event: 'streamInference', payload: [data] });
-    }
   }
 
   handleDisconnect(client: Socket) {
