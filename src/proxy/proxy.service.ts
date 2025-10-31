@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
-import * as http from 'http';
-import * as url from 'url';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 
 @Injectable()
 export class ProxyService {
@@ -10,6 +9,8 @@ export class ProxyService {
   private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
   private readonly nestjsTarget = process.env.NESTJS_TARGET || 'http://localhost:8081';
   private readonly plexTarget = process.env.PLEX_TARGET || 'http://localhost:32400';
+
+  private readonly proxies: Map<string, any> = new Map();
 
   /**
    * Get the target URL based on the host header
@@ -28,6 +29,58 @@ export class ProxyService {
   }
 
   /**
+   * Get or create a proxy middleware for a target
+   */
+  private getProxyMiddleware(targetUrl: string, host: string) {
+    const cacheKey = `${host}-${targetUrl}`;
+
+    if (!this.proxies.has(cacheKey)) {
+      const isPlex = host === 'plex.jasonmcaffee.com';
+
+      const proxy = createProxyMiddleware({
+        target: targetUrl,
+        changeOrigin: true,
+        onProxyReq: (proxyReq, req: any) => {
+          if (isPlex) {
+            // Plex-specific header modifications
+            const targetHost = new URL(targetUrl).host;
+            proxyReq.setHeader('host', targetHost);
+            proxyReq.setHeader('referer', `http://${targetHost}`);
+            proxyReq.setHeader('origin', `http://${targetHost}`);
+            proxyReq.setHeader('x-forwarded-for', '127.0.0.1');
+            proxyReq.setHeader('x-real-ip', '127.0.0.1');
+            proxyReq.setHeader('x-forwarded-proto', 'http');
+            proxyReq.removeHeader('x-forwarded-host');
+          } else {
+            // Preserve original forwarding info
+            proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
+            proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
+            proxyReq.setHeader('x-forwarded-host', host);
+          }
+        },
+        onProxyRes: (proxyRes, req: any) => {
+          this.logger.log(`📤 ${req.method} ${req.url} (${host}) ← ${proxyRes.statusCode}`);
+        },
+        onError: (err, req: any, res) => {
+          this.logger.error(`❌ ${req.method} ${req.url} (${host}) - Proxy error: ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: 'Bad Gateway',
+              message: 'Unable to proxy request to backend service',
+              timestamp: new Date().toISOString(),
+            }));
+          }
+        },
+      });
+
+      this.proxies.set(cacheKey, proxy);
+    }
+
+    return this.proxies.get(cacheKey);
+  }
+
+  /**
    * Handle the proxy request
    */
   handleProxy(req: Request, res: Response) {
@@ -39,81 +92,14 @@ export class ProxyService {
     }
 
     const targetUrl = this.getTargetUrl(host);
-    const targetUrlObj = url.parse(targetUrl);
-
     this.logger.log(`📥 ${req.method} ${req.url} (${host}) → ${targetUrl}`);
 
-    // For Plex, modify headers to use local address instead of external domain
-    const isPlex = host === 'plex.jasonmcaffee.com';
-    const headers = { ...req.headers };
-
-    if (isPlex) {
-      // Plex requires these headers to be set to the internal IP for local network detection
-      const localAddress = `${targetUrlObj.hostname}:${targetUrlObj.port}`;
-      headers.host = localAddress;
-      headers.referer = `http://${localAddress}`;
-      headers.origin = `http://${localAddress}`;
-
-      // Set X-Forwarded-For to loopback so Plex always recognizes it as local
-      // This avoids the remote streaming paywall introduced in 2025
-      headers['x-forwarded-for'] = '127.0.0.1';
-      headers['x-real-ip'] = '127.0.0.1';
-      headers['x-forwarded-proto'] = 'http';
-
-      // Remove the x-forwarded-host to avoid domain confusion
-      delete headers['x-forwarded-host'];
-    } else {
-      // For non-Plex services, preserve forwarding information
-      headers['x-forwarded-for'] = req.ip || req.connection.remoteAddress;
-      headers['x-forwarded-proto'] = req.protocol;
-      headers['x-forwarded-host'] = host;
-    }
-
-    // Create HTTP request options
-    const options = {
-      hostname: targetUrlObj.hostname,
-      port: parseInt(targetUrlObj.port || '80', 10),
-      path: req.url,
-      method: req.method,
-      headers,
-    };
-    
-    // Make the proxy request
-    const proxyReq = http.request(options, (proxyRes) => {
-      this.logger.log(`📤 ${req.method} ${req.url} (${host}) ← ${proxyRes.statusCode}`);
-      
-      // Copy response headers
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      
-      // Pipe the response
-      proxyRes.pipe(res);
-    });
-    
-    // Handle proxy request errors
-    proxyReq.on('error', (err) => {
-      this.logger.error(`❌ ${req.method} ${req.url} (${host}) - Proxy error: ${err.message}`);
-      
-      if (!res.headersSent) {
-        res.status(502).json({
-          error: 'Bad Gateway',
-          message: 'Unable to proxy request to backend service',
-          timestamp: new Date().toISOString(),
-        });
+    const proxy = this.getProxyMiddleware(targetUrl, host);
+    proxy(req, res, (err: any) => {
+      if (err) {
+        this.logger.error(`❌ Proxy middleware error: ${err.message}`);
       }
     });
-    
-    // Handle client disconnect
-    req.on('close', () => {
-      proxyReq.destroy();
-    });
-
-    // Handle request body properly
-    if (req.body && Object.keys(req.body).length > 0) {
-      // Only write body if it exists and has content
-      proxyReq.write(JSON.stringify(req.body));
-    }
-
-    // Send the request
-    proxyReq.end();
   }
+
 }

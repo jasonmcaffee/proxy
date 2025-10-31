@@ -3,6 +3,9 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
@@ -20,7 +23,7 @@ import type { Socket as ClientSocketType } from 'socket.io-client';  // <- type-
 export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(ProxyGateway.name);
-  private readonly backendUrl = process.env.NEXTJS_TARGET || 'http://localhost:8081';
+  private readonly backendUrl = process.env.NESTJS_TARGET || 'http://localhost:8081';
 
   async checkBackendHealth(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -107,7 +110,11 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.data.backendSocket = backendSocket;
 
+    this.logger.log(`Setting up .onAny() listener for client ${clientId}`);
+
     (client as any).onAny((event: string, ...args: any[]) => {
+      this.logger.log(`onAny triggered for client ${clientId}: event='${event}' backendConnected=${client.data.backendConnected} backendSocketConnected=${backendSocket.connected}`);
+
       if (client.data.backendConnected && backendSocket.connected) {
         this.logger.log(`Forwarding client event '${event}' to backend for client ${clientId}`);
         backendSocket.emit(event, ...args);
@@ -118,6 +125,27 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.data.pendingMessages.push({ event, payload: args });
       }
     });
+  }
+
+  @SubscribeMessage('streamInference')
+  handleStreamInference(
+    @MessageBody() data: any,
+    @ConnectedSocket() client: Socket,
+  ): void {
+    const clientId = client.id;
+    this.logger.log(`Received streamInference from client ${clientId}`);
+
+    const backendSocket = client.data.backendSocket;
+    if (backendSocket && backendSocket.connected && client.data.backendConnected) {
+      this.logger.log(`Forwarding streamInference to backend for client ${clientId}`);
+      backendSocket.emit('streamInference', data);
+    } else {
+      this.logger.log(`Backend not connected yet for client ${clientId}, queueing streamInference`);
+      if (!client.data.pendingMessages) {
+        client.data.pendingMessages = [];
+      }
+      client.data.pendingMessages.push({ event: 'streamInference', payload: [data] });
+    }
   }
 
   handleDisconnect(client: Socket) {

@@ -20,6 +20,7 @@ async function bootstrap() {
   console.log(`📡 Plex target: ${process.env.PLEX_TARGET || 'http://localhost:32400'}`);
 
   await app.listen(port);
+
   console.log(`✅ Proxy service running on port ${port}`);
 }
 
