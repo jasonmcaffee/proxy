@@ -12,7 +12,7 @@ async function bootstrap() {
   app.enableCors();
 
   // Get port from environment or default to 80
-  const port = process.env.PORT || 80;
+  const port = 80;
 
   console.log(`🚀 Proxy service starting on port ${port}...`);
   console.log(`📡 NextJS target: ${process.env.NEXTJS_TARGET || 'http://localhost:8080'}`);
