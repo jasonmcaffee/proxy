@@ -20,7 +20,7 @@ import type { Socket as ClientSocketType } from 'socket.io-client';  // <- type-
 export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(ProxyGateway.name);
-  private readonly backendUrl = process.env.NESTJS_TARGET || 'http://localhost:8081';
+  private readonly backendUrl = process.env.AI_TARGET || 'http://localhost:7070';
 
   async checkBackendHealth(): Promise<boolean> {
     return new Promise((resolve) => {

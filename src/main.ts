@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { ProxyService } from './proxy/proxy.service';
 import * as dotenv from 'dotenv';
+import * as http from 'http';
 
 async function bootstrap() {
   // Load environment variables
@@ -15,11 +17,22 @@ async function bootstrap() {
   const port = 80;
 
   console.log(`🚀 Proxy service starting on port ${port}...`);
-  console.log(`📡 NextJS target: ${process.env.NEXTJS_TARGET || 'http://localhost:8080'}`);
-  console.log(`📡 NestJS target: ${process.env.NESTJS_TARGET || 'http://localhost:8081'}`);
+  console.log(`📡 NextJS target: ${process.env.NEXTJS_TARGET || 'http://localhost:8082'}`);
+  console.log(`📡 AI target: ${process.env.AI_TARGET || 'http://localhost:7070'}`);
+  console.log(`📡 AI service (NestJS) target: ${process.env.AI_SERVICE_TARGET || 'http://localhost:8081'} (path: /ai-api)`);
+  console.log(`📡 Media target: ${process.env.MEDIA_TARGET || 'http://localhost:5010'}`);
   console.log(`📡 Plex target: ${process.env.PLEX_TARGET || 'http://localhost:32400'}`);
 
   await app.listen(port);
+
+  // Route raw WebSocket upgrades (non-socket.io) through a transparent TCP tunnel.
+  // Socket.io upgrades on /socket.io are handled by the NestJS WebSocket gateway.
+  const proxyService = app.get(ProxyService);
+  const httpServer = app.getHttpServer() as http.Server;
+
+  httpServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
+    proxyService.handleWsUpgrade(req, socket, head);
+  });
 
   console.log(`✅ Proxy service running on port ${port}`);
 }

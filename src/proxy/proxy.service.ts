@@ -1,14 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import * as net from 'net';
+import * as http from 'http';
 
 @Injectable()
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
 
   private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
-  private readonly nestjsTarget = process.env.NESTJS_TARGET || 'http://localhost:8081';
+  private readonly aiTarget = process.env.AI_TARGET || 'http://localhost:7070';
+  private readonly aiServiceTarget = process.env.AI_SERVICE_TARGET || 'http://localhost:8081';
+  private readonly mediaTarget = process.env.MEDIA_TARGET || 'http://localhost:5010';
   private readonly plexTarget = process.env.PLEX_TARGET || 'http://localhost:32400';
+
+  /** Path prefix that routes to the NestJS AI service backend (stripped before forwarding). */
+  private readonly aiServicePathPrefix = '/ai-api';
 
   private readonly proxies: Map<string, any> = new Map();
 
@@ -17,7 +24,9 @@ export class ProxyService {
    */
   getTargetUrl(host: string): string {
     if (host === 'ai.jasonmcaffee.com') {
-      return this.nestjsTarget;
+      return this.aiTarget;
+    } else if (host === 'media.jasonmcaffee.com') {
+      return this.mediaTarget;
     } else if (host === 'plex.jasonmcaffee.com') {
       return this.plexTarget;
     } else if (host.endsWith('jasonmcaffee.com')) {
@@ -29,6 +38,62 @@ export class ProxyService {
   }
 
   /**
+   * Proxy a WebSocket upgrade via a transparent TCP tunnel.
+   * Routes /ai-api/* upgrades to the NestJS backend (stripping the prefix);
+   * all other upgrades are routed by Host header.
+   * @param req - the incoming upgrade request
+   * @param socket - the client TCP socket
+   * @param head - buffered bytes from the client after the HTTP headers
+   */
+  handleWsUpgrade(req: http.IncomingMessage, socket: any, head: Buffer) {
+    const host = req.headers.host || '';
+    let targetUrl: string;
+    let forwardUrl = req.url || '/';
+
+    if (req.url?.startsWith(this.aiServicePathPrefix)) {
+      targetUrl = this.aiServiceTarget;
+      forwardUrl = req.url.replace(this.aiServicePathPrefix, '') || '/';
+    } else {
+      targetUrl = this.getTargetUrl(host);
+    }
+
+    const parsed = new URL(targetUrl);
+    const targetPort = parseInt(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+    const targetHost = parsed.hostname;
+
+    this.logger.log(`🔌 WS upgrade: ${req.url} (${host}) → ${targetUrl}${forwardUrl}`);
+
+    const targetSocket = net.connect(targetPort, targetHost, () => {
+      let requestLine = `${req.method} ${forwardUrl} HTTP/${req.httpVersion}\r\n`;
+      for (const [key, value] of Object.entries(req.headers)) {
+        const values = Array.isArray(value) ? value : [value];
+        for (const v of values) {
+          requestLine += `${key}: ${v}\r\n`;
+        }
+      }
+      requestLine += '\r\n';
+
+      targetSocket.write(requestLine);
+      if (head && head.length > 0) {
+        targetSocket.write(head);
+      }
+
+      socket.pipe(targetSocket);
+      targetSocket.pipe(socket);
+    });
+
+    targetSocket.on('error', (err: Error) => {
+      this.logger.error(`WS tunnel error for ${host}: ${err.message}`);
+      socket.destroy();
+    });
+
+    socket.on('error', (err: Error) => {
+      this.logger.error(`WS client socket error for ${host}: ${err.message}`);
+      targetSocket.destroy();
+    });
+  }
+
+  /**
    * Get or create a proxy middleware for a target
    */
   private getProxyMiddleware(targetUrl: string, host: string) {
@@ -36,12 +101,13 @@ export class ProxyService {
 
     if (!this.proxies.has(cacheKey)) {
       const isPlex = host === 'plex.jasonmcaffee.com';
+      const isAi = host === 'ai.jasonmcaffee.com';
 
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
-        timeout: 30000, // 30 second timeout
-        proxyTimeout: 30000,
+        // No timeout for AI — SSE streams can be long-lived
+        ...(isAi ? {} : { timeout: 30000, proxyTimeout: 30000 }),
         onProxyReq: (proxyReq, req: any) => {
           if (isPlex) {
             // Plex-specific header modifications
@@ -105,7 +171,47 @@ export class ProxyService {
   }
 
   /**
-   * Handle the proxy request
+   * Returns a cached proxy middleware for NestJS backend calls that strips the /ai-api prefix.
+   */
+  private getAiServiceProxyMiddleware() {
+    const cacheKey = 'ai-service';
+    if (!this.proxies.has(cacheKey)) {
+      const pathPrefix = this.aiServicePathPrefix;
+      const target = this.aiServiceTarget;
+      const proxy = createProxyMiddleware({
+        target,
+        changeOrigin: true,
+        pathRewrite: (path: string) => path.replace(pathPrefix, '') || '/',
+        onProxyReq: (proxyReq, req: any) => {
+          proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
+          proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
+          const contentType = req.headers['content-type'] || '';
+          const isMultipart = contentType.includes('multipart/form-data');
+          if (!isMultipart && req.body && !Buffer.isBuffer(req.body) && typeof req.body !== 'string') {
+            const bodyData = contentType.includes('application/json') ? JSON.stringify(req.body) : String(req.body);
+            proxyReq.setHeader('Content-Type', contentType);
+            proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+            proxyReq.write(bodyData);
+          }
+        },
+        onProxyRes: (proxyRes, req: any) => {
+          this.logger.log(`📤 ${req.method} ${req.url} (ai-service) ← ${proxyRes.statusCode}`);
+        },
+        onError: (err, req: any, res: any) => {
+          this.logger.error(`❌ ai-service proxy error: ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach AI service backend' }));
+          }
+        },
+      });
+      this.proxies.set(cacheKey, proxy);
+    }
+    return this.proxies.get(cacheKey);
+  }
+
+  /**
+   * Handle the proxy request, routing /ai-api/* to the NestJS backend and all else by host.
    */
   handleProxy(req: Request, res: Response) {
     let host = req.get('Host');
@@ -113,6 +219,16 @@ export class ProxyService {
     if (!host) {
       this.logger.warn('⚠️ Request without Host header, defaulting to jasonmcaffee.com');
       host = 'jasonmcaffee.com';
+    }
+
+    // Path-based routing: /ai-api/* → NestJS AI service backend (prefix stripped)
+    if (req.url.startsWith(this.aiServicePathPrefix)) {
+      this.logger.log(`📥 ${req.method} ${req.url} (${host}) → ai-service ${this.aiServiceTarget}`);
+      const proxy = this.getAiServiceProxyMiddleware();
+      proxy(req, res, (err: any) => {
+        if (err) this.logger.error(`❌ ai-service proxy middleware error: ${err.message}`);
+      });
+      return;
     }
 
     const targetUrl = this.getTargetUrl(host);

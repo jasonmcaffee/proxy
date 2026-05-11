@@ -16,6 +16,6 @@ for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr "LISTENING" ^| findstr /R /
 
 echo.
 echo Starting proxy service...
-npm run start
+npm run start:prod
 
 pause
