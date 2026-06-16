@@ -8,7 +8,11 @@ async function bootstrap() {
   // Load environment variables
   dotenv.config();
 
-  const app = await NestFactory.create(AppModule);
+  // Disable body parsing — this service is a pure pass-through proxy, so leaving
+  // the raw request stream intact lets http-proxy-middleware pipe it cleanly.
+  // (Default Nest body parser breaks socket.io polling POSTs by replacing the
+  // engine.io packet body with `[object Object]`.)
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
 
   // Enable CORS
   app.enableCors();
@@ -22,6 +26,7 @@ async function bootstrap() {
   console.log(`📡 AI service (NestJS) target: ${process.env.AI_SERVICE_TARGET || 'http://localhost:8081'} (path: /ai-api)`);
   console.log(`📡 Media target: ${process.env.MEDIA_TARGET || 'http://localhost:5010'}`);
   console.log(`📡 Plex target: ${process.env.PLEX_TARGET || 'http://localhost:32400'}`);
+  console.log(`📡 Chordical target: ${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`);
 
   await app.listen(port);
 

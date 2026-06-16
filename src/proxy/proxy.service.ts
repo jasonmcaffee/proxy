@@ -13,9 +13,16 @@ export class ProxyService {
   private readonly aiServiceTarget = process.env.AI_SERVICE_TARGET || 'http://localhost:8081';
   private readonly mediaTarget = process.env.MEDIA_TARGET || 'http://localhost:5010';
   private readonly plexTarget = process.env.PLEX_TARGET || 'http://localhost:32400';
+  /** Chordical community API (NestJS backend) — api.chordical.com */
+  private readonly chordicalApiTarget = process.env.CHORDICAL_API_TARGET || 'http://localhost:4500';
+  /** Chordical marketing UI (Next.js) — www.chordical.com */
+  private readonly chordicalUiTarget = process.env.CHORDICAL_UI_TARGET || 'http://localhost:3100';
 
   /** Path prefix that routes to the NestJS AI service backend (stripped before forwarding). */
   private readonly aiServicePathPrefix = '/ai-api';
+
+  /** Path prefix for public news HTML pages, forwarded to the NestJS backend WITHOUT stripping. */
+  private readonly newsPathPrefix = '/news';
 
   private readonly proxies: Map<string, any> = new Map();
 
@@ -31,6 +38,10 @@ export class ProxyService {
       return this.plexTarget;
     } else if (host.endsWith('jasonmcaffee.com')) {
       return this.nextjsTarget;
+    } else if (host === 'api.chordical.com') {
+      return this.chordicalApiTarget;
+    } else if (host === 'chordical.com' || host === 'www.chordical.com') {
+      return this.chordicalUiTarget;
     }
 
     // Default fallback
@@ -102,12 +113,13 @@ export class ProxyService {
     if (!this.proxies.has(cacheKey)) {
       const isPlex = host === 'plex.jasonmcaffee.com';
       const isAi = host === 'ai.jasonmcaffee.com';
+      const isChordical = host === 'chordical.com' || host === 'api.chordical.com' || host === 'www.chordical.com';
 
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
-        // No timeout for AI — SSE streams can be long-lived
-        ...(isAi ? {} : { timeout: 30000, proxyTimeout: 30000 }),
+        // No timeout for AI or Chordical — SSE/WS streams can be long-lived
+        ...(isAi || isChordical ? {} : { timeout: 30000, proxyTimeout: 30000 }),
         onProxyReq: (proxyReq, req: any) => {
           if (isPlex) {
             // Plex-specific header modifications
@@ -211,7 +223,37 @@ export class ProxyService {
   }
 
   /**
-   * Handle the proxy request, routing /ai-api/* to the NestJS backend and all else by host.
+   * Returns a cached proxy middleware that forwards /news* to the NestJS backend
+   * WITHOUT rewriting the path, so the backend receives /news/<date> unchanged.
+   */
+  private getNewsProxyMiddleware() {
+    const cacheKey = 'news-service';
+    if (!this.proxies.has(cacheKey)) {
+      const proxy = createProxyMiddleware({
+        target: this.aiServiceTarget,
+        changeOrigin: true,
+        onProxyReq: (proxyReq, req: any) => {
+          proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
+          proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
+        },
+        onProxyRes: (proxyRes, req: any) => {
+          this.logger.log(`📤 ${req.method} ${req.url} (news) ← ${proxyRes.statusCode}`);
+        },
+        onError: (err, req: any, res: any) => {
+          this.logger.error(`❌ news proxy error: ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach AI service backend' }));
+          }
+        },
+      });
+      this.proxies.set(cacheKey, proxy);
+    }
+    return this.proxies.get(cacheKey);
+  }
+
+  /**
+   * Handle the proxy request, routing /ai-api/* and /news* to the NestJS backend and all else by host.
    */
   handleProxy(req: Request, res: Response) {
     let host = req.get('Host');
@@ -227,6 +269,16 @@ export class ProxyService {
       const proxy = this.getAiServiceProxyMiddleware();
       proxy(req, res, (err: any) => {
         if (err) this.logger.error(`❌ ai-service proxy middleware error: ${err.message}`);
+      });
+      return;
+    }
+
+    // Path-based routing: /news* → NestJS AI service backend (path NOT stripped)
+    if (req.url === this.newsPathPrefix || req.url.startsWith(`${this.newsPathPrefix}/`)) {
+      this.logger.log(`📥 ${req.method} ${req.url} (${host}) → news ${this.aiServiceTarget}`);
+      const proxy = this.getNewsProxyMiddleware();
+      proxy(req, res, (err: any) => {
+        if (err) this.logger.error(`❌ news proxy middleware error: ${err.message}`);
       });
       return;
     }
