@@ -27,6 +27,7 @@ async function bootstrap() {
   console.log(`📡 Media target: ${process.env.MEDIA_TARGET || 'http://localhost:5010'}`);
   console.log(`📡 Plex target: ${process.env.PLEX_TARGET || 'http://localhost:32400'}`);
   console.log(`📡 Chordical target: ${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`);
+  console.log(`📡 Git (Gitea) target: ${process.env.GIT_TARGET || 'http://localhost:3000'}`);
 
   await app.listen(port);
 

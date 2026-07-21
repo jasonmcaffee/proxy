@@ -17,6 +17,8 @@ export class ProxyService {
   private readonly chordicalApiTarget = process.env.CHORDICAL_API_TARGET || 'http://localhost:4500';
   /** Chordical marketing UI (Next.js) — www.chordical.com */
   private readonly chordicalUiTarget = process.env.CHORDICAL_UI_TARGET || 'http://localhost:3100';
+  /** Local GitHub (Gitea) — git.jasonmcaffee.com */
+  private readonly gitTarget = process.env.GIT_TARGET || 'http://localhost:3000';
 
   /** Path prefix that routes to the NestJS AI service backend (stripped before forwarding). */
   private readonly aiServicePathPrefix = '/ai-api';
@@ -36,6 +38,8 @@ export class ProxyService {
       return this.mediaTarget;
     } else if (host === 'plex.jasonmcaffee.com') {
       return this.plexTarget;
+    } else if (host === 'git.jasonmcaffee.com') {
+      return this.gitTarget;
     } else if (host.endsWith('jasonmcaffee.com')) {
       return this.nextjsTarget;
     } else if (host === 'api.chordical.com') {
@@ -114,12 +118,15 @@ export class ProxyService {
       const isPlex = host === 'plex.jasonmcaffee.com';
       const isAi = host === 'ai.jasonmcaffee.com';
       const isChordical = host === 'chordical.com' || host === 'api.chordical.com' || host === 'www.chordical.com';
+      // Gitea: git clone/push stream large packfiles and can run well past 30s
+      const isGit = host === 'git.jasonmcaffee.com';
 
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
-        // No timeout for AI or Chordical — SSE/WS streams can be long-lived
-        ...(isAi || isChordical ? {} : { timeout: 30000, proxyTimeout: 30000 }),
+        // No timeout for AI, Chordical or Git — SSE/WS streams and git packfile
+        // transfers are long-lived and must not be cut off at 30s
+        ...(isAi || isChordical || isGit ? {} : { timeout: 30000, proxyTimeout: 30000 }),
         onProxyReq: (proxyReq, req: any) => {
           if (isPlex) {
             // Plex-specific header modifications

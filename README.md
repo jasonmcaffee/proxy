@@ -16,6 +16,7 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 
 - **ai.jasonmcaffee.com** → `localhost:8081` (NestJS server)
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
+- **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **jasonmcaffee.com** (and all other subdomains) → `localhost:8080` (Next.js server)
 
 ## Technical Approach
