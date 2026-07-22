@@ -1,29 +1,22 @@
-import { Controller, All, Req, Res, Next, Logger } from '@nestjs/common';
-import { Request, Response, NextFunction } from 'express';
+import { Controller, All, Req, Res } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { ProxyService } from './proxy.service';
 
 @Controller()
 export class ProxyController {
-  private readonly logger = new Logger(ProxyController.name);
-
   constructor(private readonly proxyService: ProxyService) {}
 
+  /**
+   * Entry point for every proxied HTTP request.
+   *
+   * task-632: this used to log the request line AND `JSON.stringify(req.headers)` here, which wrote
+   * the caller's live `ai_studio_jwt` session cookie to disk on every request. Request logging now
+   * happens once, on response, in ProxyService via RequestLoggerService — headers are never logged.
+   * @param req - the incoming request
+   * @param res - the response to write the proxied result to
+   */
   @All('*')
-  async handleAllRequests(
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    // Log every incoming request
-    const host = req.get('Host') || 'unknown';
-    const method = req.method;
-    const url = req.url;
-    const userAgent = req.get('User-Agent') || 'unknown';
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
-    
-    this.logger.log(`🌐 ${method} ${url} from ${ip} (${host}) - ${userAgent}`);
-    this.logger.log(`🔍 Request headers: ${JSON.stringify(req.headers)}`);
-    
-    // Handle the proxy request
+  async handleAllRequests(@Req() req: Request, @Res() res: Response) {
     this.proxyService.handleProxy(req, res);
   }
 }

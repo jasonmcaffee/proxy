@@ -70,9 +70,10 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     // Use `onAny` casting to any to avoid possible TS issues
+    // task-632: no per-event logging here — a single chat stream emits thousands of events and
+    // each one produced a log line. Connection lifecycle below is logged; individual frames are not.
     (backendSocket as any).onAny((event: string, ...args: any[]) => {
       if (!['connect', 'disconnect', 'error', 'connect_error'].includes(event)) {
-        this.logger.log(`Forwarding backend event '${event}' to client ${clientId}`);
         client.emit(event, ...args);
       }
     });
@@ -107,18 +108,12 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.data.backendSocket = backendSocket;
 
-    this.logger.log(`Setting up .onAny() listener for client ${clientId}`);
-
+    // task-632: forwarding is silent. Event names and payloads can carry user content, and logging
+    // one line per frame is what made this log unreadable; only queueing (a real anomaly) is noted.
     (client as any).onAny((event: string, ...args: any[]) => {
-      this.logger.log(`onAny triggered for client ${clientId}: event='${event}' backendConnected=${client.data.backendConnected} backendSocketConnected=${backendSocket.connected}`);
-
       if (client.data.backendConnected && backendSocket.connected) {
-        this.logger.log(`Forwarding client event '${event}' to backend for client ${clientId}`);
         backendSocket.emit(event, ...args);
       } else {
-        this.logger.log(
-            `Queueing event '${event}' for client ${clientId} (backend not connected)`
-        );
         client.data.pendingMessages.push({ event, payload: args });
       }
     });

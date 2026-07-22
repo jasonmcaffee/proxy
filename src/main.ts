@@ -20,14 +20,17 @@ async function bootstrap() {
   // Get port from environment or default to 80
   const port = 80;
 
-  console.log(`🚀 Proxy service starting on port ${port}...`);
-  console.log(`📡 NextJS target: ${process.env.NEXTJS_TARGET || 'http://localhost:8082'}`);
-  console.log(`📡 AI target: ${process.env.AI_TARGET || 'http://localhost:7070'}`);
-  console.log(`📡 AI service (NestJS) target: ${process.env.AI_SERVICE_TARGET || 'http://localhost:8081'} (path: /ai-api)`);
-  console.log(`📡 Media target: ${process.env.MEDIA_TARGET || 'http://localhost:5010'}`);
-  console.log(`📡 Plex target: ${process.env.PLEX_TARGET || 'http://localhost:32400'}`);
-  console.log(`📡 Chordical target: ${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`);
-  console.log(`📡 Git (Gitea) target: ${process.env.GIT_TARGET || 'http://localhost:3000'}`);
+  // task-632: one startup line instead of eight. Targets are configuration, not per-run news.
+  const targets = [
+    `next=${process.env.NEXTJS_TARGET || 'http://localhost:8082'}`,
+    `ai=${process.env.AI_TARGET || 'http://localhost:7070'}`,
+    `ai-api=${process.env.AI_SERVICE_TARGET || 'http://localhost:8081'}`,
+    `media=${process.env.MEDIA_TARGET || 'http://localhost:5010'}`,
+    `plex=${process.env.PLEX_TARGET || 'http://localhost:32400'}`,
+    `chordical=${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`,
+    `git=${process.env.GIT_TARGET || 'http://localhost:3000'}`,
+  ].join(' ');
+  console.log(`Proxy starting on port ${port} | ${targets}`);
 
   await app.listen(port);
 
@@ -40,7 +43,7 @@ async function bootstrap() {
     proxyService.handleWsUpgrade(req, socket, head);
   });
 
-  console.log(`✅ Proxy service running on port ${port}`);
+  console.log(`Proxy service running on port ${port}`);
 }
 
 bootstrap();

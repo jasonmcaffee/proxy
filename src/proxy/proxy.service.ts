@@ -1,12 +1,14 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import * as net from 'net';
 import * as http from 'http';
+import { RequestLoggerService } from './requestLogger.service';
+import { sanitizeUrl } from './logSanitizer';
 
 @Injectable()
 export class ProxyService {
-  private readonly logger = new Logger(ProxyService.name);
+  constructor(private readonly requestLogger: RequestLoggerService) {}
 
   private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
   private readonly aiTarget = process.env.AI_TARGET || 'http://localhost:7070';
@@ -76,7 +78,7 @@ export class ProxyService {
     const targetPort = parseInt(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
     const targetHost = parsed.hostname;
 
-    this.logger.log(`🔌 WS upgrade: ${req.url} (${host}) → ${targetUrl}${forwardUrl}`);
+    this.requestLogger.logInfo(`WS upgrade: ${sanitizeUrl(req.url || '/')} (${host}) -> ${targetUrl}`);
 
     const targetSocket = net.connect(targetPort, targetHost, () => {
       let requestLine = `${req.method} ${forwardUrl} HTTP/${req.httpVersion}\r\n`;
@@ -98,12 +100,12 @@ export class ProxyService {
     });
 
     targetSocket.on('error', (err: Error) => {
-      this.logger.error(`WS tunnel error for ${host}: ${err.message}`);
+      this.requestLogger.logWarn(`WS tunnel error for ${host}: ${err.message}`);
       socket.destroy();
     });
 
     socket.on('error', (err: Error) => {
-      this.logger.error(`WS client socket error for ${host}: ${err.message}`);
+      this.requestLogger.logWarn(`WS client socket error for ${host}: ${err.message}`);
       targetSocket.destroy();
     });
   }
@@ -124,6 +126,10 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
+        // task-632: silence http-proxy-middleware's own logger. It emitted its own `[HPM] Error
+        // occurred while proxying...` line for every failure, doubling an error storm; our
+        // RequestLoggerService reports the same failures once per window instead.
+        logLevel: 'silent',
         // No timeout for AI, Chordical or Git — SSE/WS streams and git packfile
         // transfers are long-lived and must not be cut off at 30s
         ...(isAi || isChordical || isGit ? {} : { timeout: 30000, proxyTimeout: 30000 }),
@@ -168,10 +174,10 @@ export class ProxyService {
           // http-proxy-middleware will automatically handle it via streaming
         },
         onProxyRes: (proxyRes, req: any) => {
-          this.logger.log(`📤 ${req.method} ${req.url} (${host}) ← ${proxyRes.statusCode}`);
+          this.requestLogger.logCompleted(req.method, req.url, host, targetUrl, proxyRes.statusCode, req.__proxyStartedAt);
         },
         onError: (err, req: any, res) => {
-          this.logger.error(`❌ ${req.method} ${req.url} (${host}) - Proxy error: ${err.message}`);
+          this.requestLogger.logError(req.method, req.url, host, err.message);
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -200,6 +206,7 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target,
         changeOrigin: true,
+        logLevel: 'silent',
         pathRewrite: (path: string) => path.replace(pathPrefix, '') || '/',
         onProxyReq: (proxyReq, req: any) => {
           proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
@@ -214,10 +221,11 @@ export class ProxyService {
           }
         },
         onProxyRes: (proxyRes, req: any) => {
-          this.logger.log(`📤 ${req.method} ${req.url} (ai-service) ← ${proxyRes.statusCode}`);
+          const host = req.headers?.host || 'unknown';
+          this.requestLogger.logCompleted(req.method, req.url, host, 'ai-service', proxyRes.statusCode, req.__proxyStartedAt);
         },
         onError: (err, req: any, res: any) => {
-          this.logger.error(`❌ ai-service proxy error: ${err.message}`);
+          this.requestLogger.logError(req.method, req.url, req.headers?.host || 'unknown', `ai-service ${err.message}`);
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach AI service backend' }));
@@ -239,15 +247,17 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target: this.aiServiceTarget,
         changeOrigin: true,
+        logLevel: 'silent',
         onProxyReq: (proxyReq, req: any) => {
           proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
           proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
         },
         onProxyRes: (proxyRes, req: any) => {
-          this.logger.log(`📤 ${req.method} ${req.url} (news) ← ${proxyRes.statusCode}`);
+          const host = req.headers?.host || 'unknown';
+          this.requestLogger.logCompleted(req.method, req.url, host, 'news', proxyRes.statusCode, req.__proxyStartedAt);
         },
         onError: (err, req: any, res: any) => {
-          this.logger.error(`❌ news proxy error: ${err.message}`);
+          this.requestLogger.logError(req.method, req.url, req.headers?.host || 'unknown', `news ${err.message}`);
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach AI service backend' }));
@@ -266,38 +276,37 @@ export class ProxyService {
     let host = req.get('Host');
 
     if (!host) {
-      this.logger.warn('⚠️ Request without Host header, defaulting to jasonmcaffee.com');
+      this.requestLogger.logWarn('Request without Host header, defaulting to jasonmcaffee.com');
       host = 'jasonmcaffee.com';
     }
 
+    // Stamp the arrival time so the single response-time log line can report duration.
+    // task-632: routing is no longer logged on the way in — one sanitized line per request is
+    // emitted on the way out (and routine reads are rolled up rather than logged individually).
+    (req as any).__proxyStartedAt = Date.now();
+
     // Path-based routing: /ai-api/* → NestJS AI service backend (prefix stripped)
     if (req.url.startsWith(this.aiServicePathPrefix)) {
-      this.logger.log(`📥 ${req.method} ${req.url} (${host}) → ai-service ${this.aiServiceTarget}`);
       const proxy = this.getAiServiceProxyMiddleware();
       proxy(req, res, (err: any) => {
-        if (err) this.logger.error(`❌ ai-service proxy middleware error: ${err.message}`);
+        if (err) this.requestLogger.logError(req.method, req.url, host, `ai-service middleware ${err.message}`);
       });
       return;
     }
 
     // Path-based routing: /news* → NestJS AI service backend (path NOT stripped)
     if (req.url === this.newsPathPrefix || req.url.startsWith(`${this.newsPathPrefix}/`)) {
-      this.logger.log(`📥 ${req.method} ${req.url} (${host}) → news ${this.aiServiceTarget}`);
       const proxy = this.getNewsProxyMiddleware();
       proxy(req, res, (err: any) => {
-        if (err) this.logger.error(`❌ news proxy middleware error: ${err.message}`);
+        if (err) this.requestLogger.logError(req.method, req.url, host, `news middleware ${err.message}`);
       });
       return;
     }
 
     const targetUrl = this.getTargetUrl(host);
-    this.logger.log(`📥 ${req.method} ${req.url} (${host}) → ${targetUrl}`);
-
     const proxy = this.getProxyMiddleware(targetUrl, host);
     proxy(req, res, (err: any) => {
-      if (err) {
-        this.logger.error(`❌ Proxy middleware error: ${err.message}`);
-      }
+      if (err) this.requestLogger.logError(req.method, req.url, host, `middleware ${err.message}`);
     });
   }
 
