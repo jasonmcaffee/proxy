@@ -29,6 +29,7 @@ async function bootstrap() {
     `plex=${process.env.PLEX_TARGET || 'http://localhost:32400'}`,
     `chordical=${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`,
     `git=${process.env.GIT_TARGET || 'http://localhost:3000'}`,
+    `phone=${process.env.PHONE_SYNC_TARGET || 'http://localhost:7071'}`,
   ].join(' ');
   console.log(`Proxy starting on port ${port} | ${targets}`);
 

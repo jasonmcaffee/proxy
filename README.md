@@ -17,7 +17,11 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 - **ai.jasonmcaffee.com** → `localhost:8081` (NestJS server)
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
+- **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
 - **jasonmcaffee.com** (and all other subdomains) → `localhost:8080` (Next.js server)
+
+Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`) are proxied with no
+request timeout; everything else is capped at 30s.
 
 ## Technical Approach
 
