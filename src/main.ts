@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ProxyService } from './proxy/proxy.service';
+import { SocketGuardService } from './proxy/socketGuard.service';
 import * as dotenv from 'dotenv';
 import * as http from 'http';
 
@@ -38,7 +39,14 @@ async function bootstrap() {
   // Route raw WebSocket upgrades (non-socket.io) through a transparent TCP tunnel.
   // Socket.io upgrades on /socket.io are handled by the NestJS WebSocket gateway.
   const proxyService = app.get(ProxyService);
+  const socketGuard = app.get(SocketGuardService);
   const httpServer = app.getHttpServer() as http.Server;
+
+  // task-1556: every inbound socket gets TCP keepalive, so a client that disappears without an RST
+  // (a phone that left the network) is reset by the stack in about a minute instead of Windows'
+  // two-hour default. Until it is reset it can hold a proxied upstream connection open, and an
+  // upstream nobody is reading is what pinned 54 GB of kernel nonpaged pool.
+  httpServer.on('connection', (socket) => socketGuard.harden(socket));
 
   httpServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
     proxyService.handleWsUpgrade(req, socket, head);

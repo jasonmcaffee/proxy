@@ -104,12 +104,14 @@ describe('ProxyGateway', () => {
       const mockResponse = {
         statusCode: 200,
         statusMessage: 'OK',
+        resume: jest.fn(),
       };
       mockHttp.request.mockImplementation((options, callback) => {
         callback(mockResponse);
         return {
           on: jest.fn(),
           end: jest.fn(),
+          destroy: jest.fn(),
         };
       });
 
@@ -122,12 +124,14 @@ describe('ProxyGateway', () => {
       const mockResponse = {
         statusCode: 500,
         statusMessage: 'Internal Server Error',
+        resume: jest.fn(),
       };
       mockHttp.request.mockImplementation((options, callback) => {
         callback(mockResponse);
         return {
           on: jest.fn(),
           end: jest.fn(),
+          destroy: jest.fn(),
         };
       });
 
@@ -145,6 +149,7 @@ describe('ProxyGateway', () => {
             }
           }),
           end: jest.fn(),
+          destroy: jest.fn(),
         };
         return mockRequest;
       });
@@ -164,8 +169,8 @@ describe('ProxyGateway', () => {
       mockHttp.request.mockImplementation((options, callback) => {
         expect(options.hostname).toBe('custom-backend');
         expect(options.port).toBe('9000');
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await newGateway.checkBackendHealth();
@@ -178,8 +183,8 @@ describe('ProxyGateway', () => {
       mockHttp.request.mockImplementation((options, callback) => {
         expect(options.hostname).toBe('localhost');
         expect(options.port).toBe('8081');
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.checkBackendHealth();
@@ -190,8 +195,8 @@ describe('ProxyGateway', () => {
     it('should handle client connection successfully', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -210,8 +215,8 @@ describe('ProxyGateway', () => {
     it('should disconnect client when backend is unhealthy', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 500 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 500, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -225,8 +230,8 @@ describe('ProxyGateway', () => {
     it('should handle backend connection success', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -247,8 +252,8 @@ describe('ProxyGateway', () => {
     it('should handle backend connection error', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -269,8 +274,8 @@ describe('ProxyGateway', () => {
     it('should handle backend disconnection', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -293,8 +298,8 @@ describe('ProxyGateway', () => {
     it('should forward client events to backend when connected', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -313,8 +318,8 @@ describe('ProxyGateway', () => {
     it('should queue client events when backend is not connected', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -336,8 +341,8 @@ describe('ProxyGateway', () => {
     it('should flush queued messages when backend connects', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -362,8 +367,8 @@ describe('ProxyGateway', () => {
     it('should forward backend events to client', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -378,8 +383,8 @@ describe('ProxyGateway', () => {
     it('should not forward system events from backend', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -401,8 +406,8 @@ describe('ProxyGateway', () => {
     it('should forward custom namespace events', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -443,8 +448,8 @@ describe('ProxyGateway', () => {
     it('should intercept all namespaces from client', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -456,8 +461,8 @@ describe('ProxyGateway', () => {
     it('should intercept all namespaces from backend', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -469,8 +474,8 @@ describe('ProxyGateway', () => {
     it('should handle events with multiple arguments correctly', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       await gateway.handleConnection(mockClient as Socket);
@@ -507,6 +512,7 @@ describe('ProxyGateway', () => {
             }
           }),
           end: jest.fn(),
+          destroy: jest.fn(),
         };
       });
 
@@ -519,8 +525,8 @@ describe('ProxyGateway', () => {
       
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       // Should not throw error
@@ -534,8 +540,8 @@ describe('ProxyGateway', () => {
     it('should handle multiple client connections', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       const client1 = { ...mockClient, id: 'client-1' };
@@ -561,8 +567,8 @@ describe('ProxyGateway', () => {
     it('should handle rapid connect/disconnect cycles', async () => {
       const mockHttp = require('http');
       mockHttp.request.mockImplementation((options, callback) => {
-        callback({ statusCode: 200 });
-        return { on: jest.fn(), end: jest.fn() };
+        callback({ statusCode: 200, resume: jest.fn() });
+        return { on: jest.fn(), end: jest.fn(), destroy: jest.fn() };
       });
 
       const client = { ...mockClient, id: 'rapid-client' };

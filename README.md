@@ -23,6 +23,38 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`) are proxied with no
 request timeout; everything else is capped at 30s.
 
+### Socket guard (task-1556)
+
+"No request timeout" used to mean "no bound at all", and that cost the box 54 GB of RAM. On
+2026-08-16 it sat at 123 of 127.5 GB while every process working set summed to only 54 GB: the rest
+was kernel nonpaged pool tagged `AfdB` — Winsock socket buffers — held by this proxy's connections
+to a Phone Sync instance that had been replaced. Restarting the proxy freed all of it at once.
+
+Every proxied stream, HTTP and raw WebSocket tunnel alike, is now watched:
+
+| Mechanism | What it catches |
+|---|---|
+| TCP keepalive on every socket, 60s idle | a peer that vanished without an RST (a phone that left the network) — Windows' own default is two hours |
+| Stall reaper, 2 min | bytes not moving *and* one side holding data the other is not draining — the leak's exact signature |
+| Idle reaper, 15 min | a pair that is simply abandoned; deliberately generous so a quiet SSE or socket.io stream is never cut |
+| Upstream destroyed on a truncated response | http-proxy only reacts to an explicit client abort; every other way a response ends used to leave the upstream open and unread |
+| Bounded upstream agent (512 sockets/origin, keep-alive) | replaces Node's unbounded global agent, so tens of thousands of concurrent upstream sockets are unreachable |
+
+A reaped pair is closed with an RST rather than a FIN, because a FIN leaves the peer half-open with
+its queue intact — which is the state being reaped in the first place.
+
+Activity is measured by polling `bytesRead`/`bytesWritten` on one shared sweep timer, never by
+attaching a `'data'` listener: that would flip a paused socket into flowing mode and destroy the
+backpressure that makes streaming correct.
+
+Tunables (all optional, defaults above): `PROXY_SOCKET_KEEPALIVE_MS`, `PROXY_SOCKET_IDLE_TIMEOUT_MS`,
+`PROXY_SOCKET_STALL_TIMEOUT_MS`, `PROXY_SOCKET_STALL_BUFFERED_BYTES`, `PROXY_SOCKET_SWEEP_INTERVAL_MS`,
+`PROXY_MAX_UPSTREAM_SOCKETS`, `PROXY_MAX_FREE_UPSTREAM_SOCKETS`.
+
+`GET http://127.0.0.1/__proxy/socket-stats` reports open pairs, the oldest of them, and the reap
+counters. It answers **loopback callers only** — the proxy fronts real public hostnames, so any other
+caller is proxied normally and the path behaves as if the route did not exist.
+
 ## Technical Approach
 
 ### 1. Core Framework

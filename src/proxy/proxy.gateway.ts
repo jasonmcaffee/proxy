@@ -10,6 +10,12 @@ import { Server, Socket } from 'socket.io';
 const { io } = require('socket.io-client');
 import type { Socket as ClientSocketType } from 'socket.io-client';  // <- type-only import
 
+/** Most frames held for a client whose backend connection has not come up yet (task-1556). */
+const MAX_PENDING_MESSAGES = 200;
+
+/** How long the pre-bridge backend probe may hang before it is destroyed (task-1556). */
+const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+
 @WebSocketGateway({
   cors: {
     origin: '*',
@@ -17,11 +23,32 @@ import type { Socket as ClientSocketType } from 'socket.io-client';  // <- type-
   },
   path: '/socket.io',
 })
+/**
+ * Bridges browser socket.io connections to the AI backend's socket.io server.
+ *
+ * task-1556: `pendingMessages` buffers frames that arrive before the backend connection is up. It
+ * used to be unbounded, so a client talking to a backend that never came up could grow the queue
+ * without limit — the heap version of the kernel-buffer leak this ticket fixes. It is now capped,
+ * and the oldest frames are dropped rather than the newest, because a stream's recent frames are
+ * the ones still worth delivering.
+ */
 export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(ProxyGateway.name);
   private readonly backendUrl = process.env.AI_TARGET || 'http://localhost:7070';
 
+  /**
+   * Probes the AI backend before bridging a client to it, so a browser is told the backend is down
+   * instead of silently queueing frames at nothing.
+   *
+   * task-1556: this used to open an `http.request` with no timeout, no response drain and no
+   * destroy, once per socket.io connection. A backend that accepts the TCP connection but never
+   * answers — a wedged Node process, exactly the state this box gets into — left every one of those
+   * sockets hung open for ever, one per browser reconnect attempt. That is a socket leak that
+   * compounds silently for hours and ends as kernel Winsock (AfdB) buffers nobody can account for.
+   * The probe now has a hard deadline, resolves once, drains the response and always destroys the
+   * request.
+   */
   async checkBackendHealth(): Promise<boolean> {
     return new Promise((resolve) => {
       const url = new URL(this.backendUrl);
@@ -30,16 +57,35 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: '/',
         method: 'GET',
+        timeout: HEALTH_CHECK_TIMEOUT_MS,
       };
 
-      const req = require('http').request(options, (res) => {
+      let settled = false;
+      // Declared before the request so `settle` can never touch it before it exists — the response
+      // callback can fire before `request()` has returned.
+      let req: any;
+      const settle = (healthy: boolean) => {
+        if (settled) return;
+        settled = true;
+        req?.destroy();
+        resolve(healthy);
+      };
+
+      req = require('http').request(options, (res) => {
         this.logger.log(`Backend health check: ${res.statusCode} ${res.statusMessage}`);
-        resolve(res.statusCode >= 200 && res.statusCode < 500);
+        // The body is irrelevant, but an undrained response holds the socket open.
+        res.resume();
+        settle(res.statusCode >= 200 && res.statusCode < 500);
+      });
+
+      req.on('timeout', () => {
+        this.logger.warn(`Backend health check timed out after ${HEALTH_CHECK_TIMEOUT_MS}ms`);
+        settle(false);
       });
 
       req.on('error', (error) => {
         this.logger.warn(`Backend health check failed: ${error.message}`);
-        resolve(false);
+        settle(false);
       });
 
       req.end();
@@ -115,6 +161,10 @@ export class ProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
         backendSocket.emit(event, ...args);
       } else {
         client.data.pendingMessages.push({ event, payload: args });
+        if (client.data.pendingMessages.length > MAX_PENDING_MESSAGES) {
+          const dropped = client.data.pendingMessages.splice(0, client.data.pendingMessages.length - MAX_PENDING_MESSAGES);
+          this.logger.warn(`Dropped ${dropped.length} queued frames for client ${clientId}: backend still not connected`);
+        }
       }
     });
   }

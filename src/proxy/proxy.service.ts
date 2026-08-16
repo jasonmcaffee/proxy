@@ -5,10 +5,24 @@ import * as net from 'net';
 import * as http from 'http';
 import { RequestLoggerService } from './requestLogger.service';
 import { sanitizeUrl } from './logSanitizer';
+import { SocketGuardService, linkSocketLifetimes } from './socketGuard.service';
+
+/**
+ * Reads a positive integer environment variable, falling back when unset or malformed.
+ * @param name - environment variable to read
+ * @param fallback - value used when the variable is absent or not a positive integer
+ */
+function readPositiveInt(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
 
 @Injectable()
 export class ProxyService {
-  constructor(private readonly requestLogger: RequestLoggerService) {}
+  constructor(
+    private readonly requestLogger: RequestLoggerService,
+    private readonly socketGuard: SocketGuardService,
+  ) {}
 
   private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
   private readonly aiTarget = process.env.AI_TARGET || 'http://localhost:7070';
@@ -31,6 +45,27 @@ export class ProxyService {
   private readonly newsPathPrefix = '/news';
 
   private readonly proxies: Map<string, any> = new Map();
+
+  /**
+   * The single upstream connection pool every proxied HTTP request goes through (task-1556).
+   *
+   * Without an explicit agent, http-proxy hands each request to Node's global agent and the number
+   * of upstream sockets this process can hold is bounded only by how fast requests arrive. That is
+   * the shape the AfdB pool blow-up actually had: 54 GB of nonpaged pool at roughly 2 MB per
+   * allocation is about 26,700 allocations, which is tens of thousands of sockets rather than a few
+   * hundred enormous ones — and it all went away the instant this process was restarted.
+   *
+   * `maxSockets` is set high enough that normal traffic never queues (the AI backend alone holds
+   * many concurrent SSE streams) but low enough that a runaway can no longer reach five figures.
+   * `keepAlive` matters for the same reason: reusing a socket is one fewer socket created and torn
+   * down, and socket churn is what accumulates kernel buffers.
+   */
+  private readonly upstreamAgent = new http.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30_000,
+    maxSockets: readPositiveInt('PROXY_MAX_UPSTREAM_SOCKETS', 512),
+    maxFreeSockets: readPositiveInt('PROXY_MAX_FREE_UPSTREAM_SOCKETS', 32),
+  });
 
   /**
    * Get the target URL based on the host header
@@ -84,6 +119,12 @@ export class ProxyService {
 
     this.requestLogger.logInfo(`WS upgrade: ${sanitizeUrl(req.url || '/')} (${host}) -> ${targetUrl}`);
 
+    // task-1556: a tunnel is a pair of sockets nothing else owns, so it is registered with the
+    // socket guard for its whole life. Without this a client that vanishes leaves the upstream half
+    // open and undrained, and the kernel buffers whatever the upstream keeps sending — the exact
+    // shape of the 54 GB AfdB nonpaged-pool leak.
+    const guard = this.socketGuard.track(`ws ${host}`, socket);
+
     const targetSocket = net.connect(targetPort, targetHost, () => {
       let requestLine = `${req.method} ${forwardUrl} HTTP/${req.httpVersion}\r\n`;
       for (const [key, value] of Object.entries(req.headers)) {
@@ -103,6 +144,13 @@ export class ProxyService {
       targetSocket.pipe(socket);
     });
 
+    guard.attachUpstream(targetSocket);
+    // Either half closing tears the other down immediately; a WebSocket has no meaningful
+    // half-open state, and a lingering half is what accumulates kernel buffers.
+    linkSocketLifetimes(socket, targetSocket);
+    targetSocket.once('close', () => guard.release());
+    socket.once('close', () => guard.release());
+
     targetSocket.on('error', (err: Error) => {
       this.requestLogger.logWarn(`WS tunnel error for ${host}: ${err.message}`);
       socket.destroy();
@@ -112,6 +160,42 @@ export class ProxyService {
       this.requestLogger.logWarn(`WS client socket error for ${host}: ${err.message}`);
       targetSocket.destroy();
     });
+  }
+
+  /**
+   * Registers an in-flight proxied HTTP request with the socket guard and guarantees the upstream
+   * connection dies with it (task-1556).
+   *
+   * Two distinct failures are covered. The first is a client that goes away mid-response:
+   * http-proxy only reacts to an explicit abort, so a response that is closed for any other reason
+   * used to leave the upstream socket open and unread while the upstream carried on writing into
+   * kernel buffers. The second is a client that neither aborts nor reads — nothing in the stack
+   * notices that at all, which is what the guard's stall/idle sweep is for.
+   * @param proxyReq - the outgoing request to the upstream
+   * @param req - the incoming client request
+   * @param res - the response being written back to the client
+   * @param label - short, low-cardinality description used in guard log lines
+   */
+  private guardProxiedRequest(proxyReq: http.ClientRequest, req: any, res: any, label: string) {
+    const guard = this.socketGuard.track(label, req.socket);
+
+    if (proxyReq.socket) guard.attachUpstream(proxyReq.socket);
+    else proxyReq.once('socket', (upstream) => guard.attachUpstream(upstream));
+
+    let released = false;
+    const finish = (truncated: boolean) => {
+      if (released) return;
+      released = true;
+      guard.release();
+      // A truncated response leaves the upstream connection unusable and, worse, still being
+      // written to. Destroying it is what returns the pinned kernel buffers.
+      if (truncated) proxyReq.destroy();
+    };
+
+    res.once('close', () => finish(!res.writableEnded));
+    res.once('finish', () => finish(false));
+    proxyReq.once('close', () => finish(false));
+    proxyReq.once('error', () => finish(false));
   }
 
   /**
@@ -133,6 +217,9 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
+        // task-1556: bounded, reusing pool instead of Node's unbounded global agent. Only for
+        // http targets — an http.Agent cannot serve an https one, and every target here is local.
+        ...(targetUrl.startsWith('http://') ? { agent: this.upstreamAgent } : {}),
         // task-632: silence http-proxy-middleware's own logger. It emitted its own `[HPM] Error
         // occurred while proxying...` line for every failure, doubling an error storm; our
         // RequestLoggerService reports the same failures once per window instead.
@@ -141,7 +228,9 @@ export class ProxyService {
         // packfile transfers and phone media uploads are long-lived and must not
         // be cut off at 30s
         ...(isAi || isChordical || isGit || isPhoneSync ? {} : { timeout: 30000, proxyTimeout: 30000 }),
-        onProxyReq: (proxyReq, req: any) => {
+        onProxyReq: (proxyReq, req: any, res: any) => {
+          this.guardProxiedRequest(proxyReq, req, res, `http ${host}`);
+
           if (isPlex) {
             // Plex-specific header modifications
             const targetHost = new URL(targetUrl).host;
@@ -214,9 +303,11 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target,
         changeOrigin: true,
+        agent: this.upstreamAgent,
         logLevel: 'silent',
         pathRewrite: (path: string) => path.replace(pathPrefix, '') || '/',
-        onProxyReq: (proxyReq, req: any) => {
+        onProxyReq: (proxyReq, req: any, res: any) => {
+          this.guardProxiedRequest(proxyReq, req, res, 'http ai-service');
           proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
           proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
           const contentType = req.headers['content-type'] || '';
@@ -255,8 +346,10 @@ export class ProxyService {
       const proxy = createProxyMiddleware({
         target: this.aiServiceTarget,
         changeOrigin: true,
+        agent: this.upstreamAgent,
         logLevel: 'silent',
-        onProxyReq: (proxyReq, req: any) => {
+        onProxyReq: (proxyReq, req: any, res: any) => {
+          this.guardProxiedRequest(proxyReq, req, res, 'http news');
           proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
           proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
         },
@@ -318,4 +411,12 @@ export class ProxyService {
     });
   }
 
+  /**
+   * Snapshot of the socket guard: how many proxied pairs are open, how long the oldest have been
+   * open, and how many have been reaped as stalled or idle. Served only to loopback callers so a
+   * runaway accumulation can be seen before it becomes a nonpaged-pool problem (task-1556).
+   */
+  socketStats() {
+    return this.socketGuard.stats();
+  }
 }
