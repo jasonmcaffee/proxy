@@ -24,7 +24,8 @@ export class ProxyService {
     private readonly socketGuard: SocketGuardService,
   ) {}
 
-  private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:8082';
+  /** Personal home page (jasonmcaffee.com / www) and the default for any unrouted host. */
+  private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:3200';
   private readonly aiTarget = process.env.AI_TARGET || 'http://localhost:7070';
   private readonly aiServiceTarget = process.env.AI_SERVICE_TARGET || 'http://localhost:8081';
   private readonly mediaTarget = process.env.MEDIA_TARGET || 'http://localhost:5010';

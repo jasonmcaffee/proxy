@@ -18,7 +18,13 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
-- **jasonmcaffee.com** (and all other subdomains) → `localhost:8080` (Next.js server)
+- **jasonmcaffee.com** / **www.jasonmcaffee.com** (and any unrouted subdomain) → `localhost:3200`
+  (Jason McAffee personal site — Next.js, `C:jasondevai-servicejasonmcaffee-site`)
+
+  This default used to be `localhost:8080`, which is **llama-server**: until task-1559 the domain
+  answered `https://jasonmcaffee.com/v1/models` with the local model list and an open completion
+  endpoint, unauthenticated, from the public internet. Pointing the default at the personal site
+  closes that.
 
 Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`) are proxied with no
 request timeout; everything else is capped at 30s.
@@ -71,11 +77,11 @@ caller is proxied normally and the path behaves as if the route did not exist.
 ### 3. Domain Resolution Logic
 ```typescript
 if (host === 'ai.jasonmcaffee.com') {
-  // Forward to localhost:8081 (NestJS)
+  // Forward to localhost:7070 (AI Studio UI)
 } else if (host === 'plex.jasonmcaffee.com') {
   // Forward to localhost:32400 (Plex)
 } else if (host.endsWith('jasonmcaffee.com')) {
-  // Forward to localhost:8080 (Next.js)
+  // Forward to localhost:3200 (personal site)
 } else {
   // Return 404 or default behavior
 }
@@ -123,13 +129,13 @@ proxy/
 ### Environment Variables
 ```env
 PORT=80                      # Port for proxy service (requires root/admin)
-NEXTJS_TARGET=http://localhost:8080
+NEXTJS_TARGET=http://localhost:3200
 NESTJS_TARGET=http://localhost:8081
 PLEX_TARGET=http://localhost:32400
 ```
 
 ### Proxy Targets
-- **Next.js Server**: `http://localhost:8080`
+- **Personal site (Next.js)**: `http://localhost:3200`
 - **NestJS Server**: `http://localhost:8081`
 - **Plex Media Server**: `http://localhost:32400`
 
