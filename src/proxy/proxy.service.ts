@@ -214,6 +214,10 @@ export class ProxyService {
       // Phone Sync: a phone uploading a multi-GB 4K video over a slow uplink is
       // a single POST that easily runs past 30s, so it must not be timed out.
       const isPhoneSync = host === 'phone.jasonmcaffee.com';
+      // The personal site serves its own video files (task-1559). A visitor on a slow connection
+      // pulling a 60 MB MP4 — or simply watching a long range request play out — runs past 30s
+      // routinely, and being cut off mid-stream stalls the player.
+      const isSite = targetUrl === this.nextjsTarget;
 
       const proxy = createProxyMiddleware({
         target: targetUrl,
@@ -225,10 +229,10 @@ export class ProxyService {
         // occurred while proxying...` line for every failure, doubling an error storm; our
         // RequestLoggerService reports the same failures once per window instead.
         logLevel: 'silent',
-        // No timeout for AI, Chordical, Git or Phone Sync — SSE/WS streams, git
-        // packfile transfers and phone media uploads are long-lived and must not
-        // be cut off at 30s
-        ...(isAi || isChordical || isGit || isPhoneSync ? {} : { timeout: 30000, proxyTimeout: 30000 }),
+        // No timeout for AI, Chordical, Git, Phone Sync or the personal site — SSE/WS streams,
+        // git packfile transfers, phone media uploads and self-hosted video are all long-lived
+        // and must not be cut off at 30s
+        ...(isAi || isChordical || isGit || isPhoneSync || isSite ? {} : { timeout: 30000, proxyTimeout: 30000 }),
         onProxyReq: (proxyReq, req: any, res: any) => {
           this.guardProxiedRequest(proxyReq, req, res, `http ${host}`);
 
