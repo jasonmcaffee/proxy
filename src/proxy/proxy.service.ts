@@ -28,7 +28,15 @@ export class ProxyService {
   private readonly nextjsTarget = process.env.NEXTJS_TARGET || 'http://localhost:3200';
   private readonly aiTarget = process.env.AI_TARGET || 'http://localhost:7070';
   private readonly aiServiceTarget = process.env.AI_SERVICE_TARGET || 'http://localhost:8081';
-  private readonly mediaTarget = process.env.MEDIA_TARGET || 'http://localhost:5010';
+  /**
+   * The public media site — media.jasonmcaffee.com (task-1569).
+   *
+   * This defaulted to 5010 from an old "new subdomains" commit, with nothing ever
+   * behind it. A Syllogi vite dev server squats `[::1]:5010` on this box, and
+   * `localhost` resolves to `::1` first on Windows, so the stale default was a
+   * live collision waiting to serve the wrong site.
+   */
+  private readonly mediaTarget = process.env.MEDIA_TARGET || 'http://localhost:3300';
   private readonly plexTarget = process.env.PLEX_TARGET || 'http://localhost:32400';
   /** Chordical community API (NestJS backend) — api.chordical.com */
   private readonly chordicalApiTarget = process.env.CHORDICAL_API_TARGET || 'http://localhost:4500';
@@ -44,6 +52,20 @@ export class ProxyService {
 
   /** Path prefix for public news HTML pages, forwarded to the NestJS backend WITHOUT stripping. */
   private readonly newsPathPrefix = '/news';
+
+  /**
+   * Path prefix carrying published media on media.jasonmcaffee.com (task-1569).
+   *
+   * Rewritten to Phone Sync's `/public/*` so the site's Node process is never in
+   * the path of a video byte range: Phone Sync owns the library, renders the
+   * derivatives, and already has the Range implementation the socket guard was
+   * built around. Scoped to that one host, so `/m/...` on any other hostname is
+   * routed normally.
+   */
+  private readonly mediaAssetPathPrefix = '/m';
+
+  /** The only host on which `/m/*` means published media. */
+  private readonly mediaHost = 'media.jasonmcaffee.com';
 
   private readonly proxies: Map<string, any> = new Map();
 
@@ -214,6 +236,9 @@ export class ProxyService {
       // Phone Sync: a phone uploading a multi-GB 4K video over a slow uplink is
       // a single POST that easily runs past 30s, so it must not be timed out.
       const isPhoneSync = host === 'phone.jasonmcaffee.com';
+      // The media site serves photographs and films (task-1569). A visitor watching a long range
+      // request play out routinely runs past 30s, and being cut off mid-stream stalls the player.
+      const isMedia = host === this.mediaHost;
       // The personal site serves its own video files (task-1559). A visitor on a slow connection
       // pulling a 60 MB MP4 — or simply watching a long range request play out — runs past 30s
       // routinely, and being cut off mid-stream stalls the player.
@@ -229,10 +254,10 @@ export class ProxyService {
         // occurred while proxying...` line for every failure, doubling an error storm; our
         // RequestLoggerService reports the same failures once per window instead.
         logLevel: 'silent',
-        // No timeout for AI, Chordical, Git, Phone Sync or the personal site — SSE/WS streams,
-        // git packfile transfers, phone media uploads and self-hosted video are all long-lived
-        // and must not be cut off at 30s
-        ...(isAi || isChordical || isGit || isPhoneSync || isSite ? {} : { timeout: 30000, proxyTimeout: 30000 }),
+        // No timeout for AI, Chordical, Git, Phone Sync, the media site or the personal site —
+        // SSE/WS streams, git packfile transfers, phone media uploads and self-hosted video are
+        // all long-lived and must not be cut off at 30s
+        ...(isAi || isChordical || isGit || isPhoneSync || isMedia || isSite ? {} : { timeout: 30000, proxyTimeout: 30000 }),
         onProxyReq: (proxyReq, req: any, res: any) => {
           this.guardProxiedRequest(proxyReq, req, res, `http ${host}`);
 
@@ -342,6 +367,47 @@ export class ProxyService {
   }
 
   /**
+   * Returns a cached proxy middleware that forwards media.jasonmcaffee.com/m/* to
+   * Phone Sync's anonymous `/public/*` routes (task-1569).
+   *
+   * Deliberately has **no timeout**: these are photographs and video byte ranges,
+   * and a player that is cut off at 30s mid-range simply stalls. The socket guard
+   * still watches every pair, so "no timeout" is not "no bound".
+   */
+  private getMediaAssetProxyMiddleware() {
+    const cacheKey = 'media-assets';
+    if (!this.proxies.has(cacheKey)) {
+      const pathPrefix = this.mediaAssetPathPrefix;
+      const target = this.phoneSyncTarget;
+      const proxy = createProxyMiddleware({
+        target,
+        changeOrigin: true,
+        agent: this.upstreamAgent,
+        logLevel: 'silent',
+        pathRewrite: (path: string) => `/public${path.slice(pathPrefix.length)}` || '/public',
+        onProxyReq: (proxyReq, req: any, res: any) => {
+          this.guardProxiedRequest(proxyReq, req, res, 'http media');
+          proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
+          proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
+        },
+        onProxyRes: (proxyRes, req: any) => {
+          const host = req.headers?.host || 'unknown';
+          this.requestLogger.logCompleted(req.method, req.url, host, 'media', proxyRes.statusCode, req.__proxyStartedAt);
+        },
+        onError: (err, req: any, res: any) => {
+          this.requestLogger.logError(req.method, req.url, req.headers?.host || 'unknown', `media ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach the media library' }));
+          }
+        },
+      });
+      this.proxies.set(cacheKey, proxy);
+    }
+    return this.proxies.get(cacheKey);
+  }
+
+  /**
    * Returns a cached proxy middleware that forwards /news* to the NestJS backend
    * WITHOUT rewriting the path, so the backend receives /news/<date> unchanged.
    */
@@ -396,6 +462,16 @@ export class ProxyService {
       const proxy = this.getAiServiceProxyMiddleware();
       proxy(req, res, (err: any) => {
         if (err) this.requestLogger.logError(req.method, req.url, host, `ai-service middleware ${err.message}`);
+      });
+      return;
+    }
+
+    // Host + path routing: media.jasonmcaffee.com/m/* → Phone Sync's public media (task-1569).
+    // Checked before the host route so published bytes skip the site's Node process entirely.
+    if (host === this.mediaHost && (req.url === this.mediaAssetPathPrefix || req.url.startsWith(`${this.mediaAssetPathPrefix}/`))) {
+      const proxy = this.getMediaAssetProxyMiddleware();
+      proxy(req, res, (err: any) => {
+        if (err) this.requestLogger.logError(req.method, req.url, host, `media middleware ${err.message}`);
       });
       return;
     }

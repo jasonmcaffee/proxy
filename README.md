@@ -18,6 +18,11 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
+- **media.jasonmcaffee.com** → `localhost:3300` (Selects — the public photo/film site,
+  `C:\jason\devi-service\media-site`), except **`/m/*`**, which is rewritten to
+  `localhost:7071/public/*` so published photographs and video byte ranges are served straight
+  from Phone Sync and never pass through the site's Node process. That prefix only means this on
+  this one host; `/m/...` anywhere else is routed normally.
 - **jasonmcaffee.com** / **www.jasonmcaffee.com** (and any unrouted subdomain) → `localhost:3200`
   (Jason McAffee personal site — Next.js, `C:jasondevai-servicejasonmcaffee-site`)
 
@@ -26,8 +31,8 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
   endpoint, unauthenticated, from the public internet. Pointing the default at the personal site
   closes that.
 
-Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`) are proxied with no
-request timeout; everything else is capped at 30s.
+Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`, `media`) are proxied
+with no request timeout; everything else is capped at 30s.
 
 ### Socket guard (task-1556)
 

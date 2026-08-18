@@ -26,7 +26,7 @@ async function bootstrap() {
     `next=${process.env.NEXTJS_TARGET || 'http://localhost:8082'}`,
     `ai=${process.env.AI_TARGET || 'http://localhost:7070'}`,
     `ai-api=${process.env.AI_SERVICE_TARGET || 'http://localhost:8081'}`,
-    `media=${process.env.MEDIA_TARGET || 'http://localhost:5010'}`,
+    `media=${process.env.MEDIA_TARGET || 'http://localhost:3300'}`,
     `plex=${process.env.PLEX_TARGET || 'http://localhost:32400'}`,
     `chordical=${process.env.CHORDICAL_TARGET || 'http://localhost:4500'}`,
     `git=${process.env.GIT_TARGET || 'http://localhost:3000'}`,
