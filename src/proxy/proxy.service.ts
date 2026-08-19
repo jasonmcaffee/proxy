@@ -64,7 +64,22 @@ export class ProxyService {
    */
   private readonly mediaAssetPathPrefix = '/m';
 
-  /** The only host on which `/m/*` means published media. */
+  /**
+   * Path prefix carrying SOCIAL POST media staged for publication (task-1576).
+   *
+   * Instagram and TikTok publish by fetching the media themselves, from their own servers, with no
+   * credential and no willingness to follow a redirect — so a post's image or video has to be
+   * reachable at an ordinary public HTTPS URL for the length of the publish window. This forwards
+   * `media.jasonmcaffee.com/s/<token>.<ext>` to the AI service's one anonymous route, which resolves
+   * the token to a staged copy and refuses everything else with a uniform 404.
+   *
+   * It lives on the media host rather than `ai.jasonmcaffee.com` deliberately: post media has no
+   * business being served from the studio's API hostname, and TikTok verifies a *URL prefix* with
+   * the platform, which is not something to point at an authenticated API surface.
+   */
+  private readonly socialStagePathPrefix = '/s';
+
+  /** The only host on which `/m/*` means published media, and `/s/*` staged social media. */
   private readonly mediaHost = 'media.jasonmcaffee.com';
 
   private readonly proxies: Map<string, any> = new Map();
@@ -408,6 +423,52 @@ export class ProxyService {
   }
 
   /**
+   * Returns a cached proxy middleware that forwards media.jasonmcaffee.com/s/* to the AI service's
+   * anonymous social-media staging route (task-1576).
+   *
+   * No timeout, for the same reason `/m/*` has none: Meta fetching a several-hundred-megabyte Reel
+   * over this uplink runs well past 30s, and a fetch cut off mid-range is indistinguishable at the
+   * platform's end from a corrupt file. The socket guard still watches the pair, so "no timeout" is
+   * not "no bound".
+   *
+   * `x-forwarded-host` is set explicitly — unlike the generic host proxy, this middleware would not
+   * otherwise send one, and the backend uses it to keep staged media off any other hostname.
+   */
+  private getSocialStageProxyMiddleware() {
+    const cacheKey = 'social-stage';
+    if (!this.proxies.has(cacheKey)) {
+      const pathPrefix = this.socialStagePathPrefix;
+      const mediaHost = this.mediaHost;
+      const proxy = createProxyMiddleware({
+        target: this.aiServiceTarget,
+        changeOrigin: true,
+        agent: this.upstreamAgent,
+        logLevel: 'silent',
+        pathRewrite: (path: string) => `/social/public-media${path.slice(pathPrefix.length)}`,
+        onProxyReq: (proxyReq, req: any, res: any) => {
+          this.guardProxiedRequest(proxyReq, req, res, 'http social-stage');
+          proxyReq.setHeader('x-forwarded-for', req.ip || req.connection?.remoteAddress || 'unknown');
+          proxyReq.setHeader('x-forwarded-proto', req.protocol || 'http');
+          proxyReq.setHeader('x-forwarded-host', mediaHost);
+        },
+        onProxyRes: (proxyRes, req: any) => {
+          const host = req.headers?.host || 'unknown';
+          this.requestLogger.logCompleted(req.method, req.url, host, 'social-stage', proxyRes.statusCode, req.__proxyStartedAt);
+        },
+        onError: (err, req: any, res: any) => {
+          this.requestLogger.logError(req.method, req.url, req.headers?.host || 'unknown', `social-stage ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Bad Gateway', message: 'Unable to reach the media staging service' }));
+          }
+        },
+      });
+      this.proxies.set(cacheKey, proxy);
+    }
+    return this.proxies.get(cacheKey);
+  }
+
+  /**
    * Returns a cached proxy middleware that forwards /news* to the NestJS backend
    * WITHOUT rewriting the path, so the backend receives /news/<date> unchanged.
    */
@@ -472,6 +533,16 @@ export class ProxyService {
       const proxy = this.getMediaAssetProxyMiddleware();
       proxy(req, res, (err: any) => {
         if (err) this.requestLogger.logError(req.method, req.url, host, `media middleware ${err.message}`);
+      });
+      return;
+    }
+
+    // Host + path routing: media.jasonmcaffee.com/s/* → the AI service's anonymous staged-media
+    // route (task-1576). Scoped to that one host, so `/s/...` anywhere else routes normally.
+    if (host === this.mediaHost && (req.url === this.socialStagePathPrefix || req.url.startsWith(`${this.socialStagePathPrefix}/`))) {
+      const proxy = this.getSocialStageProxyMiddleware();
+      proxy(req, res, (err: any) => {
+        if (err) this.requestLogger.logError(req.method, req.url, host, `social-stage middleware ${err.message}`);
       });
       return;
     }
