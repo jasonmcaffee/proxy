@@ -1,10 +1,35 @@
 # Proxy Service
 
-A TypeScript Node.js reverse proxy service that routes traffic to different local services based on domain names.
+A native Rust reverse proxy that routes Cloudflare traffic to local services by host and path while preserving streaming, byte ranges, uploads, SSE, Socket.IO polling, and WebSocket upgrades.
+
+## Production implementation
+
+The production implementation is the Rust `proxy_rs.node` native module, built from this Cargo project and hosted by the machine's firewall-authorized Node executable. The prior NestJS implementation remains in `src/**/*.ts` as rollback/reference code.
+
+```powershell
+cargo build --release --bins --lib
+Copy-Item .\target\release\proxy_rs.dll .\target\release\proxy_rs.node
+$env:PORT = '18080'
+node .\native-host.cjs
+```
+
+Node loads the module and keeps its background Tokio runtime alive; it does not accept sockets or
+process request data. The listener, HTTP parsing, routing, header policy, streaming, upgrades,
+observability, and failure handling remain entirely in Rust. This arrangement uses the existing
+inbound firewall grant without an extra TCP relay or broader firewall permissions.
+
+Operational endpoints are deliberately loopback-only:
+
+- `GET /__proxy/health` — version and uptime.
+- `GET /__proxy/ready` — validated listener/configuration readiness.
+- `GET /__proxy/socket-stats` — active HTTP and upgraded connection counts.
+- `GET /__proxy/metrics` — Prometheus text metrics.
+
+Use `cargo run --release --bin ab_compare` with `BASELINE_URL` and `CANDIDATE_URL` for safe response-parity checks. Use `cargo run --release --bin proxy_bench` with `BENCH_URL`, `BENCH_HOST`, `BENCH_REQUESTS`, and `BENCH_CONCURRENCY` for repeatable load probes.
 
 ## Overview
 
-This service acts as a reverse proxy that receives HTTP requests and forwards them to appropriate local services based on the domain name. It's designed to work with Cloudflare DNS management where A records point to your server's IP address.
+This service receives HTTP/1.1 from Cloudflare after TLS termination and forwards each request to a configured loopback service. Hyper streams bodies with backpressure and tunnels upgrades without parsing application frames.
 
 ## Architecture
 
@@ -14,7 +39,10 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 
 ### Domain Routing
 
-- **ai.jasonmcaffee.com** → `localhost:8081` (NestJS server)
+The Rust router evaluates segment-aware special paths first: `/ai-api` strips its prefix to the AI backend, `/news` reaches the AI backend unchanged, `media.../m` rewrites to Phone Sync `/public`, and `media.../s` rewrites to the AI backend's `/social/public-media`. AI-host `/socket.io` polling/upgrades also go directly to the AI backend. Host routing then selects AI UI `:7070`, personal site `:3200`, media UI `:3300`, Plex `:32400`, Git `:3000`, Phone Sync `:7071`, Chordical API `:4500`, or Chordical UI `:3100`.
+
+- **ai.jasonmcaffee.com** → `localhost:7070` (AI Studio UI), except `/ai-api/*` and
+  `/socket.io/*`, which route to the AI backend on `localhost:8091`
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
@@ -31,10 +59,12 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
   endpoint, unauthenticated, from the public internet. Pointing the default at the personal site
   closes that.
 
-Hosts that stream or carry long uploads (`ai`, `chordical`, `git`, `phone`, `media`) are proxied
-with no request timeout; everything else is capped at 30s.
+Request and response bodies stream with backpressure and no whole-body buffering. Upstream connects
+are capped at 5 seconds, Plex response headers at 30 seconds, and upgraded connections at 15 idle
+minutes. Ordinary HTTP streams remain governed by client/upstream lifecycle rather than an arbitrary
+response deadline.
 
-### Socket guard (task-1556)
+### Legacy Node socket guard (rollback reference)
 
 "No request timeout" used to mean "no bound at all", and that cost the box 54 GB of RAM. On
 2026-08-16 it sat at 123 of 127.5 GB while every process working set summed to only 54 GB: the rest
@@ -66,7 +96,12 @@ Tunables (all optional, defaults above): `PROXY_SOCKET_KEEPALIVE_MS`, `PROXY_SOC
 counters. It answers **loopback callers only** — the proxy fronts real public hostnames, so any other
 caller is proxied normally and the path behaves as if the route did not exist.
 
-## Technical Approach
+The Rust implementation replaces these JavaScript listener guards with owned connection permits,
+bounded per-origin pools, TCP keepalive, backpressured body streams, upgrade idle timeouts, and
+drop-based accounting. The historical description above documents the rollback implementation and
+the leak that the Rust resource limits must continue to prevent.
+
+## Legacy TypeScript implementation (rollback reference)
 
 ### 1. Core Framework
 - **Node.js** with **TypeScript** for type safety and modern JavaScript features
@@ -235,7 +270,3 @@ curl -H "Host: blog.jasonmcaffee.com" http://localhost/
 - **No Rate Limiting**: Rate limiting is not implemented
 - **No Health Checks**: Health check endpoints are not included
 - **No Caching**: Request caching is not implemented
-
----
-
-**Note**: This README outlines the technical approach. Please review and approve before we proceed with implementation.
