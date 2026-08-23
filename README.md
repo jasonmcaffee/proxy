@@ -4,7 +4,7 @@ A native Rust reverse proxy that routes Cloudflare traffic to local services by 
 
 ## Production implementation
 
-The production implementation is the Rust `proxy_rs.node` native module, built from this Cargo project and hosted by the machine's firewall-authorized Node executable. The prior NestJS implementation remains in `src/**/*.ts` as rollback/reference code.
+The production implementation is the Rust `proxy_rs.node` native module, built from this Cargo project and hosted by the machine's firewall-authorized Node executable. The obsolete NestJS implementation has been removed; Git history retains it if historical comparison is needed.
 
 ```powershell
 cargo build --release --bins --lib
@@ -64,7 +64,7 @@ are capped at 5 seconds, Plex response headers at 30 seconds, and upgraded conne
 minutes. Ordinary HTTP streams remain governed by client/upstream lifecycle rather than an arbitrary
 response deadline.
 
-### Legacy Node socket guard (rollback reference)
+### Historical socket-leak context
 
 "No request timeout" used to mean "no bound at all", and that cost the box 54 GB of RAM. On
 2026-08-16 it sat at 123 of 127.5 GB while every process working set summed to only 54 GB: the rest
@@ -101,7 +101,7 @@ bounded per-origin pools, TCP keepalive, backpressured body streams, upgrade idl
 drop-based accounting. The historical description above documents the rollback implementation and
 the leak that the Rust resource limits must continue to prevent.
 
-## Legacy TypeScript implementation (rollback reference)
+## Historical TypeScript architecture
 
 ### 1. Core Framework
 - **Node.js** with **TypeScript** for type safety and modern JavaScript features
@@ -240,9 +240,9 @@ PLEX_TARGET=http://localhost:32400
 ## Getting Started
 
 1. Clone the repository
-2. Install dependencies: `npm install`
+2. Install a current Rust toolchain and Node.js (the native-module host only)
 3. Configure environment variables
-4. Start development server: `npm run dev`
+4. Build with `cargo build --release --bins --lib`, copy `proxy_rs.dll` to `proxy_rs.node`, and run `node native-host.cjs`
 5. Test with different domain configurations
 
 ## Testing
