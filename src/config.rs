@@ -21,6 +21,10 @@ pub struct Config {
     pub connect_timeout: Duration,
     pub plex_header_timeout: Duration,
     pub upgrade_idle_timeout: Duration,
+    /// How long a plain HTTP exchange may move no bytes before the socket guard reaps it (task-1556).
+    pub http_idle_timeout: Duration,
+    /// How often the socket guard checks every in-flight exchange (task-1556).
+    pub guard_sweep_interval: Duration,
     pub keep_alive: Duration,
     pub max_connections: usize,
     pub max_upstream_per_target: usize,
@@ -47,6 +51,8 @@ impl Config {
             connect_timeout: Duration::from_millis(read_u64("PROXY_CONNECT_TIMEOUT_MS", 5_000)?),
             plex_header_timeout: Duration::from_millis(read_u64("PROXY_PLEX_HEADER_TIMEOUT_MS", 30_000)?),
             upgrade_idle_timeout: Duration::from_millis(read_u64("PROXY_SOCKET_IDLE_TIMEOUT_MS", 900_000)?),
+            http_idle_timeout: Duration::from_millis(read_u64("PROXY_SOCKET_IDLE_TIMEOUT_MS", 900_000)?),
+            guard_sweep_interval: Duration::from_millis(read_u64("PROXY_SOCKET_SWEEP_INTERVAL_MS", 15_000)?),
             keep_alive: Duration::from_millis(read_u64("PROXY_SOCKET_KEEPALIVE_MS", 60_000)?),
             max_connections: read_usize("PROXY_MAX_CONNECTIONS", 2_048)?,
             max_upstream_per_target: read_usize("PROXY_MAX_UPSTREAM_SOCKETS", 512)?,
@@ -70,6 +76,8 @@ impl Config {
             connect_timeout: Duration::from_secs(1),
             plex_header_timeout: Duration::from_secs(1),
             upgrade_idle_timeout: Duration::from_secs(2),
+            http_idle_timeout: Duration::from_secs(900),
+            guard_sweep_interval: Duration::from_secs(3_600),
             keep_alive: Duration::from_secs(1),
             max_connections: 128,
             max_upstream_per_target: 64,

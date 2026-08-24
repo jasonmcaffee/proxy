@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod proxy;
 pub mod routing;
 pub mod server;
+pub mod socket_guard;
 
 pub use config::Config;
 pub use server::{build_state, run, run_with_listener};

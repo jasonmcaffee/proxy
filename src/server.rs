@@ -3,6 +3,7 @@ use crate::{
     logging::RequestLog,
     metrics::ProxyMetrics,
     proxy::{AppState, handle_request},
+    socket_guard::{GuardConfig, SocketGuard},
 };
 use hyper::{Request, body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::{
@@ -24,7 +25,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-/// Builds the pooled upstream client, metrics registry, and request logger.
+/// Builds the pooled upstream client, metrics registry, request logger, and socket guard.
 pub fn build_state(config: Config) -> Result<AppState, Box<dyn Error + Send + Sync>> {
     let mut connector = HttpConnector::new();
     connector.enforce_http(true);
@@ -36,7 +37,12 @@ pub fn build_state(config: Config) -> Result<AppState, Box<dyn Error + Send + Sy
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(config.max_idle_per_host)
         .build(connector);
-    Ok(AppState::new(config, client, ProxyMetrics::new()?, RequestLog::new()))
+    let guard = SocketGuard::new(GuardConfig {
+        keep_alive_ms: config.keep_alive.as_millis() as u64,
+        idle_timeout_ms: config.http_idle_timeout.as_millis() as u64,
+        sweep_interval_ms: config.guard_sweep_interval.as_millis() as u64,
+    });
+    Ok(AppState::new(config, client, ProxyMetrics::new()?, RequestLog::new(), guard))
 }
 
 /// Binds the configured address and serves until the process receives Ctrl-C.

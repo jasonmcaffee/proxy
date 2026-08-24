@@ -69,6 +69,31 @@ async fn start_proxy_for_target(target: Url) -> TestStack {
     TestStack { proxy_addr, proxy_task, upstream_task }
 }
 
+/// Starts a proxy in front of an upstream that accepts connections and then answers nothing.
+///
+/// This is the wedged-Node-process shape that cost 54 GB of kernel nonpaged pool in task-1556, and
+/// the shape the socket guard exists to bound. The permit pool is deliberately tiny so a guard that
+/// failed to release its permits would be visible as a 503 on the very next request.
+async fn start_stack_with_a_wedged_upstream(idle: Duration, sweep: Duration, permits: usize) -> TestStack {
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let mut wedged = Vec::new();
+        while let Ok((stream, _)) = upstream.accept().await {
+            wedged.push(stream);
+        }
+    });
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let mut config = Config::for_tests(proxy_addr, Url::parse(&format!("http://{upstream_addr}")).unwrap());
+    config.http_idle_timeout = idle;
+    config.guard_sweep_interval = sweep;
+    config.max_upstream_per_target = permits;
+    let state = build_state(config).unwrap();
+    let proxy_task = tokio::spawn(run_with_listener(proxy, state));
+    TestStack { proxy_addr, proxy_task, upstream_task }
+}
+
 /// Accepts fake-upstream connections and gives each an independent HTTP/1 task.
 async fn serve_upstream(listener: TcpListener) {
     while let Ok((stream, _)) = listener.accept().await {
@@ -103,6 +128,7 @@ async fn upstream_response(mut request: Request<Incoming>) -> Result<Response<Te
             .body(full_body("2345"))
             .unwrap()),
         "/sse" => Ok(Response::builder().status(StatusCode::OK).header(CONTENT_TYPE, "text/event-stream").body(sse_body()).unwrap()),
+        "/drip" => Ok(Response::builder().status(StatusCode::OK).header(CONTENT_TYPE, "text/event-stream").body(drip_body()).unwrap()),
         _ => Ok(echo_response(request).await),
     }
 }
@@ -144,6 +170,24 @@ fn sse_body() -> TestBody {
     });
     StreamBody::new(frames).boxed_unsync()
 }
+
+/// Returns a long-lived stream whose frames are spaced well inside a short idle window.
+///
+/// Its total lifetime is several times the guard's idle window in the test that uses it, so a guard
+/// that reaped on age rather than on activity would cut it off part way through.
+fn drip_body() -> TestBody {
+    let frames = stream::unfold(0_u8, |step| async move {
+        if step >= DRIP_FRAMES {
+            return None;
+        }
+        time::sleep(Duration::from_millis(60)).await;
+        Some((Ok::<_, TestError>(Frame::data(Bytes::from_static(b"data: drip\n\n"))), step + 1))
+    });
+    StreamBody::new(frames).boxed_unsync()
+}
+
+/// How many frames the drip stream emits before completing.
+const DRIP_FRAMES: u8 = 6;
 
 /// Echoes opaque upgraded bytes until either endpoint closes.
 async fn echo_upgraded<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut stream: T) -> std::io::Result<()> {
@@ -324,4 +368,80 @@ async fn read_headers(stream: &mut TcpStream) -> String {
         }
     }
     String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+async fn replaces_a_caller_supplied_forwarded_for_chain_instead_of_appending_to_it() {
+    let stack = start_stack().await;
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("http://{}/ai-api/echo", stack.proxy_addr))
+        .header(HOST, "ai.jasonmcaffee.com")
+        .header("x-forwarded-for", "9.9.9.9")
+        .header("x-forwarded-host", "evil.example")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = client().request(request).await.unwrap();
+    let value: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    // The AI backend keys its login throttle on the FIRST entry of this header, so a caller must
+    // never be able to put a value there (task-696 H2, re-opened by the rewrite, closed again here).
+    assert_eq!(value["forwardedFor"], "127.0.0.1");
+    assert_eq!(value["forwardedHost"], "ai.jasonmcaffee.com");
+}
+
+#[tokio::test]
+async fn reaps_exchanges_against_a_wedged_upstream_and_returns_their_permits() {
+    let stack = start_stack_with_a_wedged_upstream(Duration::from_millis(200), Duration::from_millis(50), 2).await;
+    for round in 0..2 {
+        let first = send(&stack, Method::GET, "/ai-api/wedged", "ai.jasonmcaffee.com", None, Bytes::new());
+        let second = send(&stack, Method::GET, "/ai-api/wedged", "ai.jasonmcaffee.com", None, Bytes::new());
+        let (first, second) = tokio::join!(first, second);
+        // Every round must be reaped on its own merits; a leaked permit would surface as a 503.
+        assert_eq!(first.status(), StatusCode::GATEWAY_TIMEOUT, "round {round}");
+        assert_eq!(second.status(), StatusCode::GATEWAY_TIMEOUT, "round {round}");
+        let body = String::from_utf8(first.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(body.contains("Unable to reach AI service backend"), "round {round}: {body}");
+        assert!(body.contains("timestamp"), "round {round}: the pre-rewrite error contract carries a timestamp");
+    }
+}
+
+#[tokio::test]
+async fn reports_guard_reap_counters_on_socket_stats() {
+    let stack = start_stack_with_a_wedged_upstream(Duration::from_millis(200), Duration::from_millis(50), 4).await;
+    assert_eq!(send(&stack, Method::GET, "/ai-api/wedged", "ai.jasonmcaffee.com", None, Bytes::new()).await.status(), StatusCode::GATEWAY_TIMEOUT);
+    let response = send(&stack, Method::GET, "/__proxy/socket-stats", "jasonmcaffee.com", None, Bytes::new()).await;
+    let stats: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    // The AI service's kernel-pool watchdog tells an operator to read exactly these fields.
+    assert_eq!(stats["reapedIdle"], 1);
+    assert_eq!(stats["reapedStalled"], 0);
+    assert_eq!(stats["trackedNow"], 0);
+    assert!(stats["trackedTotal"].as_u64().unwrap() >= 1);
+    assert!(stats["config"]["idleTimeoutMs"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn never_reaps_a_stream_that_is_still_producing_frames() {
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(serve_upstream(upstream));
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let mut config = Config::for_tests(proxy_addr, Url::parse(&format!("http://{upstream_addr}")).unwrap());
+    // The drip stream runs about 360ms in total, so an age-based reaper would cut it off; frames
+    // arrive every 60ms, so an activity-based one must leave it entirely alone.
+    config.http_idle_timeout = Duration::from_millis(150);
+    config.guard_sweep_interval = Duration::from_millis(25);
+    let state = build_state(config).unwrap();
+    let proxy_task = tokio::spawn(run_with_listener(proxy, state));
+    let stack = TestStack { proxy_addr, proxy_task, upstream_task };
+
+    let response = send(&stack, Method::GET, "/drip", "ai.jasonmcaffee.com", None, Bytes::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut frames = 0_u8;
+    while let Some(frame) = body.frame().await {
+        assert_eq!(frame.unwrap().into_data().unwrap(), "data: drip\n\n");
+        frames += 1;
+    }
+    assert_eq!(frames, DRIP_FRAMES, "an active stream must survive an idle window shorter than its lifetime");
 }

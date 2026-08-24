@@ -4,9 +4,10 @@ use crate::{
     logging::RequestLog,
     metrics::{ProxyMetrics, UpgradeLease},
     routing::{RouteClass, RouteDecision, route_request},
+    socket_guard::{GuardHandle, SocketGuard},
 };
 use bytes::Bytes;
-use http_body::Frame;
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use hyper::{
     HeaderMap, Method, Request, Response, StatusCode, Uri,
@@ -20,13 +21,16 @@ use hyper_util::{
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time,
 };
 
@@ -39,14 +43,15 @@ pub struct AppState {
     pub client: HttpClient,
     pub metrics: ProxyMetrics,
     pub request_log: RequestLog,
+    pub guard: SocketGuard,
     upstream_limits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AppState {
     /// Creates proxy state around a configured Hyper client.
-    pub fn new(config: Config, client: HttpClient, metrics: ProxyMetrics, request_log: RequestLog) -> Self {
+    pub fn new(config: Config, client: HttpClient, metrics: ProxyMetrics, request_log: RequestLog, guard: SocketGuard) -> Self {
         let upstream_limits = Arc::new(Mutex::new(HashMap::new()));
-        Self { config, client, metrics, request_log, upstream_limits }
+        Self { config, client, metrics, request_log, guard, upstream_limits }
     }
 
     /// Acquires capacity from the selected target's independent concurrency pool.
@@ -66,25 +71,31 @@ struct PreparedForward {
     is_upgrade: bool,
     downstream_upgrade: Option<hyper::upgrade::OnUpgrade>,
     permit: OwnedSemaphorePermit,
+    guard: GuardHandle,
+    cancelled: oneshot::Receiver<()>,
+}
+
+/// An upstream exchange that ended before a response existed, and the status that describes it.
+struct UpstreamFailure {
+    status: StatusCode,
+    message: String,
 }
 
 /// Handles one downstream request, including diagnostics, preflight, streaming, and upgrades.
 pub async fn handle_request(request: Request<Incoming>, peer: SocketAddr, state: AppState) -> Result<Response<ProxyBody>, BoxError> {
-    if let Some(response) = diagnostic_response(request.uri().path(), peer.ip(), &state.config, &state.metrics) {
+    if let Some(response) = diagnostic_response(request.uri().path(), peer.ip(), &state.config, &state.metrics, &state.guard) {
         return Ok(response);
     }
     if is_cors_preflight(&request) {
         return Ok(cors_preflight_response(&request));
     }
-    let (context, outbound) = match prepare_forward_request(request, peer.ip(), &state) {
+    let (mut context, outbound) = match prepare_forward_request(request, peer.ip(), &state) {
         Ok(prepared) => prepared,
         Err(response) => return Ok(*response),
     };
-    let upstream = match request_upstream(&state, &context.route, outbound).await {
+    let upstream = match request_upstream(&state, &context.route, outbound, &mut context.cancelled).await {
         Ok(response) => response,
-        Err(message) => {
-            return Ok(upstream_failure(&state, &context.route, &context.method, &context.original_path, context.started, context.permit, &message));
-        }
+        Err(failure) => return Ok(upstream_failure(&state, context, &failure)),
     };
     Ok(finalize_upstream_response(upstream, context, &state))
 }
@@ -103,25 +114,48 @@ fn prepare_forward_request(
         Ok(permit) => permit,
         Err(_) => return Err(Box::new(capacity_response())),
     };
+    // task-1556/task-1637: every exchange is watched from here until its body is dropped, so an
+    // upstream that accepts the connection and then answers nothing cannot hold the permit forever.
+    let (guard, cancelled) = state.guard.track(format!("http {}", route.class.as_str()));
     state.metrics.request_started();
-    let outbound = build_upstream_request(request, peer, &route, &state.metrics, is_upgrade).map_err(|error| {
+    let outbound = build_upstream_request(request, peer, &route, &state.metrics, is_upgrade, guard.activity()).map_err(|error| {
         state.metrics.request_finished(route.class, method.as_str(), 400, started.elapsed());
         Box::new(json_response(StatusCode::BAD_REQUEST, json!({"error":"Bad Request","message":error,"requestId":request_id()})))
     })?;
-    let context = PreparedForward { started, method, original_path, route, is_upgrade, downstream_upgrade, permit };
+    let context = PreparedForward { started, method, original_path, route, is_upgrade, downstream_upgrade, permit, guard, cancelled };
     Ok((context, outbound))
 }
 
-/// Sends a prepared request and applies Plex's bounded response-header wait.
-async fn request_upstream(state: &AppState, route: &RouteDecision, outbound: Request<ProxyBody>) -> Result<Response<Incoming>, String> {
+/// Sends a prepared request, applying Plex's bounded header wait and the socket guard's reap signal.
+async fn request_upstream(
+    state: &AppState, route: &RouteDecision, outbound: Request<ProxyBody>, cancelled: &mut oneshot::Receiver<()>,
+) -> Result<Response<Incoming>, UpstreamFailure> {
+    let request = state.client.request(outbound);
+    tokio::pin!(request);
     if route.class == RouteClass::Plex {
-        match time::timeout(state.config.plex_header_timeout, state.client.request(outbound)).await {
-            Ok(result) => result.map_err(|error| error.to_string()),
-            Err(_) => Err("upstream response header timeout".to_string()),
+        tokio::select! {
+            result = time::timeout(state.config.plex_header_timeout, &mut request) => match result {
+                Ok(result) => result.map_err(bad_gateway),
+                Err(_) => Err(bad_gateway("upstream response header timeout")),
+            },
+            _ = &mut *cancelled => Err(reaped_failure()),
         }
     } else {
-        state.client.request(outbound).await.map_err(|error| error.to_string())
+        tokio::select! {
+            result = &mut request => result.map_err(bad_gateway),
+            _ = &mut *cancelled => Err(reaped_failure()),
+        }
     }
+}
+
+/// Describes an upstream that failed outright, which is the proxy's 502 contract.
+fn bad_gateway<T: ToString>(error: T) -> UpstreamFailure {
+    UpstreamFailure { status: StatusCode::BAD_GATEWAY, message: error.to_string() }
+}
+
+/// Describes an exchange the socket guard reaped for moving no bytes inside the idle window.
+fn reaped_failure() -> UpstreamFailure {
+    UpstreamFailure { status: StatusCode::GATEWAY_TIMEOUT, message: "reaped by the socket guard: idle with no upstream response".to_string() }
 }
 
 /// Converts an upstream response into a tracked body or an owned upgraded tunnel.
@@ -145,10 +179,12 @@ fn finalize_upstream_response(mut upstream: Response<Incoming>, context: Prepare
     let mut response = Response::from_parts(parts, tracked_body.boxed_unsync());
     apply_cors(response.headers_mut());
     if let (Some(downstream), Some(upstream)) = (context.downstream_upgrade, upstream_upgrade) {
+        // An upgraded tunnel leaves the request guard's scope and is bounded by `tunnel_with_idle`.
+        drop(context.guard);
         spawn_upgrade_tunnel(downstream, upstream, state.config.upgrade_idle_timeout, state.metrics.clone(), class, lease);
         response
     } else {
-        attach_response_lease(response, lease)
+        attach_response_lease(response, lease, context.guard, context.cancelled)
     }
 }
 
@@ -171,27 +207,66 @@ fn spawn_upgrade_tunnel(
     });
 }
 
-/// Keeps completion accounting alive until the downstream body is dropped.
-fn attach_response_lease(response: Response<ProxyBody>, lease: RequestLease) -> Response<ProxyBody> {
+/// Keeps completion accounting and the socket guard alive until the downstream body is dropped.
+fn attach_response_lease(response: Response<ProxyBody>, lease: RequestLease, guard: GuardHandle, cancelled: oneshot::Receiver<()>) -> Response<ProxyBody> {
     let (parts, body) = response.into_parts();
-    let tracked = body.map_frame(move |frame| {
-        let _keep_alive = &lease;
+    Response::from_parts(parts, GuardedBody { inner: body, cancelled, guard, _lease: lease }.boxed_unsync())
+}
+
+/// Streams one response body while marking activity and honoring the socket guard's reap signal.
+///
+/// Every frame that reaches the downstream is proof the exchange is doing work, so it refreshes the
+/// idle window. A reap resolves the cancellation channel, which fails the body and lets Hyper tear
+/// the connection down — the Rust equivalent of the Node guard resetting both halves.
+struct GuardedBody {
+    inner: ProxyBody,
+    cancelled: oneshot::Receiver<()>,
+    guard: GuardHandle,
+    _lease: RequestLease,
+}
+
+impl Body for GuardedBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let body = self.get_mut();
+        if Pin::new(&mut body.cancelled).poll(context).is_ready() {
+            return Poll::Ready(Some(Err("reaped by the socket guard: idle response stream".into())));
+        }
+        let frame = Pin::new(&mut body.inner).poll_frame(context);
+        if matches!(frame, Poll::Ready(Some(Ok(_)))) {
+            body.guard.touch();
+        }
         frame
-    });
-    Response::from_parts(parts, tracked.boxed_unsync())
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 /// Rebuilds a streaming request for the selected upstream and applies forwarding policy.
 fn build_upstream_request(
     request: Request<Incoming>, peer: IpAddr, route: &RouteDecision, metrics: &ProxyMetrics, preserve_upgrade: bool,
+    activity: crate::socket_guard::ActivityMark,
 ) -> Result<Request<ProxyBody>, String> {
     let (mut parts, body) = request.into_parts();
     parts.uri = upstream_uri(route)?;
     sanitize_request_headers(&mut parts.headers, peer, route, preserve_upgrade);
     let class = route.class;
     let metrics_for_body = metrics.clone();
-    let body =
-        body.map_frame(move |frame| record_request_frame(frame, class, &metrics_for_body)).map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync();
+    let body = body
+        .map_frame(move |frame| {
+            activity.touch();
+            record_request_frame(frame, class, &metrics_for_body)
+        })
+        .map_err(|error| -> BoxError { Box::new(error) })
+        .boxed_unsync();
     Ok(Request::from_parts(parts, body))
 }
 
@@ -218,7 +293,7 @@ fn sanitize_request_headers(headers: &mut HeaderMap, peer: IpAddr, route: &Route
         headers.remove("x-forwarded-host");
         return;
     }
-    append_forwarded_for(headers, peer);
+    set_forwarded_for(headers, peer);
     let forwarded_proto =
         headers.get("x-forwarded-proto").and_then(|value| value.to_str().ok()).filter(|value| matches!(*value, "http" | "https")).unwrap_or("http").to_string();
     headers.insert("x-forwarded-proto", forwarded_proto.parse().unwrap());
@@ -249,12 +324,22 @@ fn remove_hop_by_hop(headers: &mut HeaderMap, preserve_upgrade: bool) {
     }
 }
 
-/// Appends the real peer to an existing standards-compatible forwarding chain.
-fn append_forwarded_for(headers: &mut HeaderMap, peer: IpAddr) {
-    let existing = headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty());
-    let combined = existing.map_or_else(|| peer.to_string(), |value| format!("{value}, {peer}"));
-    if let Ok(value) = combined.parse() {
+/// Replaces any caller-supplied forwarding chain with the address this proxy actually accepted.
+///
+/// task-1637: the rewrite changed this from replace to append, which quietly made the FIRST entry
+/// of `X-Forwarded-For` attacker-controlled. The AI backend's `clientIp()` reads exactly that entry
+/// to key the login throttle, so an attacker could mint a fresh throttle bucket per attempt by
+/// rotating the header — the task-696 H2 hole, re-opened one layer deep. The Node proxy this
+/// replaced used `setHeader`, which overwrites, and that is restored here: whatever the internet
+/// claims about earlier hops is not evidence, and this proxy is the boundary that decides.
+///
+/// The real visitor address is still available to any backend that wants it, from Cloudflare's own
+/// `CF-Connecting-IP`, which is passed through untouched.
+fn set_forwarded_for(headers: &mut HeaderMap, peer: IpAddr) {
+    if let Ok(value) = peer.to_string().parse() {
         headers.insert("x-forwarded-for", value);
+    } else {
+        headers.remove("x-forwarded-for");
     }
 }
 
@@ -299,14 +384,24 @@ fn capacity_response() -> Response<ProxyBody> {
     response
 }
 
-/// Records an upstream failure and builds its public-safe 502 response.
-fn upstream_failure(
-    state: &AppState, route: &RouteDecision, method: &Method, path: &str, started: Instant, _permit: OwnedSemaphorePermit, message: &str,
-) -> Response<ProxyBody> {
+/// Records an upstream failure and builds its public-safe response, releasing the guard and permit.
+///
+/// `timestamp` is part of the pre-rewrite error contract the Node proxy published on every 502 and
+/// is kept, alongside the newer non-secret `requestId` correlator.
+fn upstream_failure(state: &AppState, context: PreparedForward, failure: &UpstreamFailure) -> Response<ProxyBody> {
+    let route = &context.route;
     state.metrics.upstream_error(route.class);
-    state.metrics.request_finished(route.class, method.as_str(), 502, started.elapsed());
-    state.request_log.upstream_error(method.as_str(), path, &route.original_host, route.class.as_str(), message);
-    let mut response = json_response(StatusCode::BAD_GATEWAY, json!({"error":"Bad Gateway","message":route.class.failure_message(),"requestId":request_id()}));
+    state.metrics.request_finished(route.class, context.method.as_str(), failure.status.as_u16(), context.started.elapsed());
+    state.request_log.upstream_error(context.method.as_str(), &context.original_path, &route.original_host, route.class.as_str(), &failure.message);
+    let mut response = json_response(
+        failure.status,
+        json!({
+            "error": failure.status.canonical_reason().unwrap_or("Bad Gateway"),
+            "message": route.class.failure_message(),
+            "requestId": request_id(),
+            "timestamp": rfc3339_now(),
+        }),
+    );
     apply_cors(response.headers_mut());
     response
 }
@@ -366,6 +461,32 @@ where
         total += count as u64;
         lease.touch();
     }
+}
+
+/// Formats the current instant as the RFC 3339 timestamp the Node proxy put in every error body.
+fn rfc3339_now() -> String {
+    let total = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seconds = total.as_secs() as i64;
+    let millis = total.subsec_millis();
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (time_of_day / 3_600, (time_of_day % 3_600) / 60, time_of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// Converts days since the Unix epoch to a civil date using Howard Hinnant's `civil_from_days`.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Creates a non-secret correlation identifier for deterministic error bodies.

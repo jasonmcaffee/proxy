@@ -22,7 +22,8 @@ Operational endpoints are deliberately loopback-only:
 
 - `GET /__proxy/health` — version and uptime.
 - `GET /__proxy/ready` — validated listener/configuration readiness.
-- `GET /__proxy/socket-stats` — active HTTP and upgraded connection counts.
+- `GET /__proxy/socket-stats` — active HTTP and upgraded connection counts, the oldest
+  exchanges the socket guard is watching, and its reap counters.
 - `GET /__proxy/metrics` — Prometheus text metrics.
 
 Use `cargo run --release --bin ab_compare` with `BASELINE_URL` and `CANDIDATE_URL` for safe response-parity checks. Use `cargo run --release --bin proxy_bench` with `BENCH_URL`, `BENCH_HOST`, `BENCH_REQUESTS`, and `BENCH_CONCURRENCY` for repeatable load probes.
@@ -96,10 +97,34 @@ Tunables (all optional, defaults above): `PROXY_SOCKET_KEEPALIVE_MS`, `PROXY_SOC
 counters. It answers **loopback callers only** — the proxy fronts real public hostnames, so any other
 caller is proxied normally and the path behaves as if the route did not exist.
 
-The Rust implementation replaces these JavaScript listener guards with owned connection permits,
-bounded per-origin pools, TCP keepalive, backpressured body streams, upgrade idle timeouts, and
-drop-based accounting. The historical description above documents the rollback implementation and
-the leak that the Rust resource limits must continue to prevent.
+The Rust implementation keeps all of this, in `src/socket_guard.rs`, plus owned connection permits,
+bounded per-origin pools, backpressured body streams and drop-based accounting.
+
+Two rows of that table survived the rewrite on their own and one did not, which task-1637 found and
+fixed:
+
+| Mechanism | State in Rust |
+|---|---|
+| TCP keepalive on every socket | present — `server::configure_stream` downstream, the connector upstream |
+| Idle reaper, 15 min | **restored by task-1637.** The rewrite bounded only *upgraded* tunnels; a plain HTTP exchange had no time bound at all, so an upstream that accepted a connection and then answered nothing held its concurrency permit for the life of the process and 503'd its own route from then on. One shared sweep now cancels any exchange that has moved no bytes inside the window, answering 504 and releasing the permit |
+| Stall reaper, 2 min | **deliberately not ported.** It keyed on `socket.writableLength`, Node's userland write queue, which exists because Node's stream layer accepts writes faster than the peer drains them. Hyper polls a response body only when the downstream connection can take it, so the condition it detected cannot arise. A shorter "the upstream has not answered yet" timer in its place would be a different rule with a different victim — a genuinely slow backend call — so it is not invented. `PROXY_SOCKET_STALL_TIMEOUT_MS` and `PROXY_SOCKET_STALL_BUFFERED_BYTES` are therefore unread, and `reapedStalled` is always 0 |
+| Upstream destroyed on a truncated response | present, and structural rather than a listener: dropping the response body drops the upstream connection |
+| Bounded upstream pool | present — `PROXY_MAX_UPSTREAM_SOCKETS` per origin, `PROXY_MAX_CONNECTIONS` downstream |
+
+Activity is measured per exchange, from the frames that actually cross it in either direction, so an
+idle window shorter than a stream's total lifetime never cuts a stream that is still producing.
+
+### Forwarding headers
+
+`X-Forwarded-For` is **replaced** with the address this proxy accepted, never appended to. The AI
+backend keys its login throttle on the first entry of that header (task-696 H2), so a caller that
+could put a value there could mint a fresh throttle bucket per attempt. The rewrite changed this to
+append and task-1637 changed it back. Cloudflare's own `CF-Connecting-IP` is passed through
+untouched for any backend that wants the real visitor address.
+
+`X-Forwarded-Host` is likewise replaced with the real `Host` (the media host for the `/s/*` staging
+prefix, which the AI service checks). `X-Forwarded-Proto` is passed through when it is `http` or
+`https`, because Cloudflare sets it and the session cookie's `Secure` flag depends on it.
 
 ## Historical TypeScript architecture
 

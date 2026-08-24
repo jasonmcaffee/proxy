@@ -1,6 +1,6 @@
 use regex::Regex;
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -55,8 +55,12 @@ struct RequestLogInner {
     suppressed: AtomicU64,
     non_ok: AtomicU64,
     upstream_errors: AtomicU64,
-    seen: Mutex<HashSet<String>>,
+    /// Distinct method+path+status seen this window, and how many times each repeated.
+    seen: Mutex<HashMap<String, u64>>,
 }
+
+/// How many distinct repeated conditions the rollup line names, so a storm stays diagnosable.
+const ROLLUP_TOP_N: usize = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LogLevel {
@@ -75,7 +79,7 @@ impl RequestLog {
                 suppressed: AtomicU64::new(0),
                 non_ok: AtomicU64::new(0),
                 upstream_errors: AtomicU64::new(0),
-                seen: Mutex::new(HashSet::new()),
+                seen: Mutex::new(HashMap::new()),
             }),
         };
         logger.spawn_rollup();
@@ -90,7 +94,7 @@ impl RequestLog {
         }
         let safe_url = sanitize_url(url);
         let key = format!("{method} {safe_url} {status}");
-        let first = self.inner.seen.lock().map(|mut seen| seen.insert(key)).unwrap_or(false);
+        let first = self.record_occurrence(key);
         if !should_log(self.inner.level, method, status) || !first {
             self.inner.suppressed.fetch_add(1, Ordering::Relaxed);
             return;
@@ -105,10 +109,23 @@ impl RequestLog {
         self.inner.upstream_errors.fetch_add(1, Ordering::Relaxed);
         let safe_url = sanitize_url(url);
         let key = format!("{method} {safe_url} ERROR");
-        let first = self.inner.seen.lock().map(|mut seen| seen.insert(key)).unwrap_or(false);
+        let first = self.record_occurrence(key);
         if first {
             error!(method, url = %safe_url, host, route, error = %redact_secrets(message), "upstream proxy error");
         }
+    }
+
+    /// Counts one occurrence of a distinct condition, reporting whether this was its first.
+    fn record_occurrence(&self, key: String) -> bool {
+        self.inner
+            .seen
+            .lock()
+            .map(|mut seen| {
+                let count = seen.entry(key).or_insert(0);
+                *count += 1;
+                *count == 1
+            })
+            .unwrap_or(false)
     }
 
     /// Emits a low-volume lifecycle message.
@@ -133,11 +150,17 @@ impl RequestLog {
                 let suppressed = inner.suppressed.swap(0, Ordering::Relaxed);
                 let non_ok = inner.non_ok.swap(0, Ordering::Relaxed);
                 let upstream_errors = inner.upstream_errors.swap(0, Ordering::Relaxed);
-                if let Ok(mut seen) = inner.seen.lock() {
-                    seen.clear();
-                }
+                let top = inner
+                    .seen
+                    .lock()
+                    .map(|mut seen| {
+                        let rendered = format_top_repeats(&seen);
+                        seen.clear();
+                        rendered
+                    })
+                    .unwrap_or_default();
                 if total > 0 {
-                    info!(total, non_ok, upstream_errors, suppressed, "request rollup for last 60s");
+                    info!(total, non_ok, upstream_errors, suppressed, top = %top, "request rollup for last 60s");
                 }
             }
         });
@@ -190,6 +213,15 @@ fn secret_patterns() -> &'static Vec<(Regex, &'static str)> {
             (Regex::new(r"(?i)data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+").unwrap(), "<data-uri-redacted>"),
         ]
     })
+}
+
+/// Renders the most-repeated conditions of the window, so a storm is diagnosable from the single
+/// rollup line without having logged every occurrence of it.
+fn format_top_repeats(seen: &HashMap<String, u64>) -> String {
+    let mut repeated = seen.iter().filter(|(_, count)| **count > 1).collect::<Vec<_>>();
+    repeated.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    repeated.truncate(ROLLUP_TOP_N);
+    repeated.iter().map(|(key, count)| format!("{key} x{count}")).collect::<Vec<_>>().join(", ")
 }
 
 /// Caps sanitized URL text to keep logs and aggregation keys bounded.
