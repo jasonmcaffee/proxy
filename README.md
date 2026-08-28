@@ -40,13 +40,17 @@ Internet → Cloudflare DNS → Your Server IP → Proxy Service → Local Servi
 
 ### Domain Routing
 
-The Rust router evaluates segment-aware special paths first: `/ai-api` strips its prefix to the AI backend, `/news` reaches the AI backend unchanged, `media.../m` rewrites to Phone Sync `/public`, and `media.../s` rewrites to the AI backend's `/social/public-media`. AI-host `/socket.io` polling/upgrades also go directly to the AI backend. Host routing then selects AI UI `:7070`, personal site `:3200`, media UI `:3300`, Plex `:32400`, Git `:3000`, Phone Sync `:7071`, Chordical API `:4500`, or Chordical UI `:3100`.
+The Rust router evaluates segment-aware special paths first: `/ai-api` strips its prefix to the AI backend, `/news` reaches the AI backend unchanged, `media.../m` rewrites to Phone Sync `/public`, and `media.../s` rewrites to the AI backend's `/social/public-media`. AI-host `/socket.io` polling/upgrades also go directly to the AI backend. Host routing then selects AI UI `:7070`, personal site `:3200`, media UI `:3300`, Plex `:32400`, Git `:3000`, Phone Sync `:7071`, Nikaya `:8110`, Chordical API `:4500`, or Chordical UI `:3100`.
 
 - **ai.jasonmcaffee.com** → `localhost:7070` (AI Studio UI), except `/ai-api/*` and
   `/socket.io/*`, which route to the AI backend on `localhost:8091`
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
+- **taxes.jasonmcaffee.com** → `localhost:8110` (Nikaya — the local Gmail research service,
+  `C:\jason\dev\Nikaya`). Nikaya binds loopback and authenticates every `/api` route itself, so this
+  route is the only thing that makes it reachable; the proxy adds no auth of its own. Override with
+  `NIKAYA_TARGET`.
 - **media.jasonmcaffee.com** → `localhost:3300` (Selects — the public photo/film site,
   `C:\jason\devi-service\media-site`), except **`/m/*`**, which is rewritten to
   `localhost:7071/public/*` so published photographs and video byte ranges are served straight

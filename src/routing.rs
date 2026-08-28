@@ -23,6 +23,7 @@ pub enum RouteClass {
     Phone,
     ChordicalApi,
     ChordicalUi,
+    Nikaya,
 }
 
 impl RouteClass {
@@ -42,6 +43,7 @@ impl RouteClass {
             Self::Phone => "phone",
             Self::ChordicalApi => "chordical-api",
             Self::ChordicalUi => "chordical-ui",
+            Self::Nikaya => "nikaya",
         }
     }
 
@@ -51,6 +53,7 @@ impl RouteClass {
             Self::MediaAsset => "Unable to reach the media library",
             Self::SocialStage => "Unable to reach the media staging service",
             Self::AiApi | Self::AiSocket | Self::News => "Unable to reach AI service backend",
+            Self::Nikaya => "Unable to reach the Nikaya service",
             _ => "Unable to proxy request to backend service",
         }
     }
@@ -98,6 +101,7 @@ pub fn route_request(config: &Config, headers: &HeaderMap, path_and_query: &str)
         "plex.jasonmcaffee.com" => (RouteClass::Plex, &config.plex_target),
         "git.jasonmcaffee.com" => (RouteClass::Git, &config.git_target),
         "phone.jasonmcaffee.com" => (RouteClass::Phone, &config.phone_sync_target),
+        "taxes.jasonmcaffee.com" => (RouteClass::Nikaya, &config.nikaya_target),
         "api.chordical.com" => (RouteClass::ChordicalApi, &config.chordical_api_target),
         "chordical.com" | "www.chordical.com" => (RouteClass::ChordicalUi, &config.chordical_ui_target),
         _ => (RouteClass::PersonalSite, &config.nextjs_target),
@@ -176,6 +180,7 @@ mod tests {
             ("plex.jasonmcaffee.com", RouteClass::Plex),
             ("git.jasonmcaffee.com", RouteClass::Git),
             ("phone.jasonmcaffee.com", RouteClass::Phone),
+            ("taxes.jasonmcaffee.com", RouteClass::Nikaya),
             ("api.chordical.com", RouteClass::ChordicalApi),
             ("chordical.com", RouteClass::ChordicalUi),
             ("www.chordical.com", RouteClass::ChordicalUi),
@@ -209,6 +214,16 @@ mod tests {
         assert_eq!(route_request(&cfg, &host("ai.jasonmcaffee.com"), "/ai-api-evil").class, RouteClass::AiUi);
         assert_eq!(route_request(&cfg, &host(MEDIA_HOST), "/mismatch").class, RouteClass::MediaUi);
         assert_eq!(route_request(&cfg, &host("example.com"), "/newsletter").class, RouteClass::PersonalSite);
+    }
+
+    #[test]
+    fn keeps_the_nikaya_host_off_the_shared_special_paths() {
+        // /news and /ai-api are matched before the host, so a Nikaya path that happens to start with
+        // one of those segments would otherwise be handed to the AI backend instead.
+        let cfg = config();
+        assert_eq!(route_request(&cfg, &host("taxes.jasonmcaffee.com"), "/api/auth/login").class, RouteClass::Nikaya);
+        assert_eq!(route_request(&cfg, &host("taxes.jasonmcaffee.com"), "/newsletter").class, RouteClass::Nikaya);
+        assert_eq!(route_request(&cfg, &host("taxes.jasonmcaffee.com"), "/api/agent/stream").upstream_path, "/api/agent/stream");
     }
 
     #[test]
