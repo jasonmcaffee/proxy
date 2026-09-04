@@ -22,6 +22,8 @@ pub struct Config {
     pub nikaya_target: Url,
     /// Black Rainbow Labs, the static site behind blackrainbowlabs.com (task-1799).
     pub black_rainbow_target: Url,
+    /// Unluminous, the product site behind unluminous.com (task-1806).
+    pub unluminous_target: Url,
     pub connect_timeout: Duration,
     pub plex_header_timeout: Duration,
     pub upgrade_idle_timeout: Duration,
@@ -54,6 +56,7 @@ impl Config {
             phone_sync_target: read_url("PHONE_SYNC_TARGET", "http://localhost:7071")?,
             nikaya_target: read_url("NIKAYA_TARGET", "http://localhost:8110")?,
             black_rainbow_target: read_url("BLACK_RAINBOW_TARGET", "http://localhost:3400")?,
+            unluminous_target: read_url("UNLUMINOUS_TARGET", "http://localhost:3500")?,
             connect_timeout: Duration::from_millis(read_u64("PROXY_CONNECT_TIMEOUT_MS", 5_000)?),
             plex_header_timeout: Duration::from_millis(read_u64("PROXY_PLEX_HEADER_TIMEOUT_MS", 30_000)?),
             upgrade_idle_timeout: Duration::from_millis(read_u64("PROXY_SOCKET_IDLE_TIMEOUT_MS", 900_000)?),
@@ -80,7 +83,8 @@ impl Config {
             git_target: target.clone(),
             phone_sync_target: target.clone(),
             nikaya_target: target.clone(),
-            black_rainbow_target: target,
+            black_rainbow_target: target.clone(),
+            unluminous_target: target,
             connect_timeout: Duration::from_secs(1),
             plex_header_timeout: Duration::from_secs(1),
             upgrade_idle_timeout: Duration::from_secs(2),

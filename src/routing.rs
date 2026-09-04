@@ -25,6 +25,7 @@ pub enum RouteClass {
     ChordicalUi,
     Nikaya,
     BlackRainbowUi,
+    UnluminousUi,
 }
 
 impl RouteClass {
@@ -46,6 +47,7 @@ impl RouteClass {
             Self::ChordicalUi => "chordical-ui",
             Self::Nikaya => "nikaya",
             Self::BlackRainbowUi => "black-rainbow-ui",
+            Self::UnluminousUi => "unluminous-ui",
         }
     }
 
@@ -57,6 +59,7 @@ impl RouteClass {
             Self::AiApi | Self::AiSocket | Self::News => "Unable to reach AI service backend",
             Self::Nikaya => "Unable to reach the Nikaya service",
             Self::BlackRainbowUi => "Unable to reach the Black Rainbow Labs site",
+            Self::UnluminousUi => "Unable to reach the Unluminous site",
             _ => "Unable to proxy request to backend service",
         }
     }
@@ -108,6 +111,7 @@ pub fn route_request(config: &Config, headers: &HeaderMap, path_and_query: &str)
         "api.chordical.com" => (RouteClass::ChordicalApi, &config.chordical_api_target),
         "chordical.com" | "www.chordical.com" => (RouteClass::ChordicalUi, &config.chordical_ui_target),
         "blackrainbowlabs.com" | "www.blackrainbowlabs.com" => (RouteClass::BlackRainbowUi, &config.black_rainbow_target),
+        "unluminous.com" | "www.unluminous.com" => (RouteClass::UnluminousUi, &config.unluminous_target),
         // Everything unrouted still lands on the personal site. That default used to point at
         // llama-server, which answered the public internet with the local model list, so a new arm
         // above it is always added with a test that proves this line has not moved.
@@ -193,6 +197,8 @@ mod tests {
             ("www.chordical.com", RouteClass::ChordicalUi),
             ("blackrainbowlabs.com", RouteClass::BlackRainbowUi),
             ("www.blackrainbowlabs.com", RouteClass::BlackRainbowUi),
+            ("unluminous.com", RouteClass::UnluminousUi),
+            ("www.unluminous.com", RouteClass::UnluminousUi),
             ("jasonmcaffee.com", RouteClass::PersonalSite),
             ("blog.jasonmcaffee.com", RouteClass::PersonalSite),
             ("unrelated.example", RouteClass::PersonalSite),
@@ -208,6 +214,7 @@ mod tests {
         assert_eq!(normalize_host("Chordical.COM."), "chordical.com");
         assert_eq!(normalize_host("WWW.BlackRainbowLabs.COM:80"), "www.blackrainbowlabs.com");
         assert_eq!(normalize_host("BlackRainbowLabs.com."), "blackrainbowlabs.com");
+        assert_eq!(normalize_host("WWW.Unluminous.COM:80"), "www.unluminous.com");
     }
 
     #[test]
@@ -220,6 +227,7 @@ mod tests {
             assert_eq!(route_request(&cfg, &host(hostname), "/").class, RouteClass::PersonalSite, "{hostname}");
         }
         assert_eq!(route_request(&cfg, &host("blackrainbowlabs.com.evil.example"), "/").class, RouteClass::PersonalSite);
+        assert_eq!(route_request(&cfg, &host("unluminous.com.evil.example"), "/").class, RouteClass::PersonalSite);
     }
 
     #[test]
@@ -230,6 +238,18 @@ mod tests {
         for path in ["/", "/videos/quill.mp4", "/images/hero-droplet.webp", "/no-such-page"] {
             let decision = route_request(&cfg, &host("blackrainbowlabs.com"), path);
             assert_eq!(decision.class, RouteClass::BlackRainbowUi, "{path}");
+            assert_eq!(decision.upstream_path, path, "{path}");
+        }
+    }
+
+    #[test]
+    fn sends_the_unluminous_host_to_its_own_upstream_for_every_path() {
+        // The site serves its own 33 MB product video, so a range request on it has to reach that
+        // upstream rather than being swept up by one of the shared path rules matched before the host.
+        let cfg = config();
+        for path in ["/", "/videos/unluminous.mp4", "/images/shots/opacity-035.webp", "/no-such-page"] {
+            let decision = route_request(&cfg, &host("unluminous.com"), path);
+            assert_eq!(decision.class, RouteClass::UnluminousUi, "{path}");
             assert_eq!(decision.upstream_path, path, "{path}");
         }
     }
