@@ -21,6 +21,7 @@ async fn main() {
         chordical_ui = %config.chordical_ui_target,
         git = %config.git_target,
         phone = %config.phone_sync_target,
+        tasks_board = %config.tasks_board_target,
         "proxy targets loaded"
     );
     if let Err(error) = run(config).await {

@@ -47,6 +47,13 @@ The Rust router evaluates segment-aware special paths first: `/ai-api` strips it
 - **plex.jasonmcaffee.com** → `localhost:32400` (Plex Media Server)
 - **git.jasonmcaffee.com** → `localhost:3000` (Gitea — local GitHub, `D:\dev\local-github`)
 - **phone.jasonmcaffee.com** → `localhost:7071` (Phone Sync — phone photo/video backup, `C:\jason\dev\phone-sync`)
+- **tasks.jasonmcaffee.com** → `127.0.0.1:8096` (the Rust agent tasks board,
+  `C:\jason\dev\agent-tasks-service`). The board binds loopback and authenticates every route
+  itself, and it treats a request arriving under this host name differently from a local one: the
+  shared machine secret every local tool uses is **refused** here, so the only way in from outside
+  is an account. It reads the host name from `X-Forwarded-Host`, which this proxy sets from its own
+  routing decision — `Host` is rewritten to the upstream authority before forwarding, so that header
+  cannot carry it. Override the upstream with `TASKS_BOARD_TARGET`.
 - **taxes.jasonmcaffee.com** → `localhost:8110` (Nikaya — the local Gmail research service,
   `C:\jason\dev\Nikaya`). Nikaya binds loopback and authenticates every `/api` route itself, so this
   route is the only thing that makes it reachable; the proxy adds no auth of its own. Override with

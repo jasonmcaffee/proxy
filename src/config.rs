@@ -26,6 +26,14 @@ pub struct Config {
     pub unluminous_target: Url,
     /// Inillucent, the retrieval-engine product site behind inillucent.com (task-1809).
     pub inillucent_target: Url,
+    /// The Rust agent tasks board behind tasks.jasonmcaffee.com (task-2059).
+    ///
+    /// Unlike every other upstream here, this one is reached by a caller who signs in to it: it
+    /// refuses the machine secret every local tool uses when the request arrives under this host
+    /// name, so the only way through is an account. That rule lives in the board, not in this
+    /// proxy — what the proxy contributes is passing the host name along unchanged, which is what
+    /// the board keys the rule on.
+    pub tasks_board_target: Url,
     pub connect_timeout: Duration,
     pub plex_header_timeout: Duration,
     pub upgrade_idle_timeout: Duration,
@@ -60,6 +68,7 @@ impl Config {
             black_rainbow_target: read_url("BLACK_RAINBOW_TARGET", "http://localhost:3400")?,
             unluminous_target: read_url("UNLUMINOUS_TARGET", "http://localhost:3500")?,
             inillucent_target: read_url("INILLUCENT_TARGET", "http://localhost:3600")?,
+            tasks_board_target: read_url("TASKS_BOARD_TARGET", "http://127.0.0.1:8096")?,
             connect_timeout: Duration::from_millis(read_u64("PROXY_CONNECT_TIMEOUT_MS", 5_000)?),
             plex_header_timeout: Duration::from_millis(read_u64("PROXY_PLEX_HEADER_TIMEOUT_MS", 30_000)?),
             upgrade_idle_timeout: Duration::from_millis(read_u64("PROXY_SOCKET_IDLE_TIMEOUT_MS", 900_000)?),
@@ -88,7 +97,8 @@ impl Config {
             nikaya_target: target.clone(),
             black_rainbow_target: target.clone(),
             unluminous_target: target.clone(),
-            inillucent_target: target,
+            inillucent_target: target.clone(),
+            tasks_board_target: target,
             connect_timeout: Duration::from_secs(1),
             plex_header_timeout: Duration::from_secs(1),
             upgrade_idle_timeout: Duration::from_secs(2),

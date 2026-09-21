@@ -27,6 +27,8 @@ pub enum RouteClass {
     BlackRainbowUi,
     UnluminousUi,
     InillucentUi,
+    /// The Rust agent tasks board behind tasks.jasonmcaffee.com (task-2059).
+    TasksBoard,
 }
 
 impl RouteClass {
@@ -50,6 +52,7 @@ impl RouteClass {
             Self::BlackRainbowUi => "black-rainbow-ui",
             Self::UnluminousUi => "unluminous-ui",
             Self::InillucentUi => "inillucent-ui",
+            Self::TasksBoard => "tasks-board",
         }
     }
 
@@ -63,6 +66,7 @@ impl RouteClass {
             Self::BlackRainbowUi => "Unable to reach the Black Rainbow Labs site",
             Self::UnluminousUi => "Unable to reach the Unluminous site",
             Self::InillucentUi => "Unable to reach the Inillucent site",
+            Self::TasksBoard => "Unable to reach the agent tasks board",
             _ => "Unable to proxy request to backend service",
         }
     }
@@ -116,6 +120,7 @@ pub fn route_request(config: &Config, headers: &HeaderMap, path_and_query: &str)
         "blackrainbowlabs.com" | "www.blackrainbowlabs.com" => (RouteClass::BlackRainbowUi, &config.black_rainbow_target),
         "unluminous.com" | "www.unluminous.com" => (RouteClass::UnluminousUi, &config.unluminous_target),
         "inillucent.com" | "www.inillucent.com" => (RouteClass::InillucentUi, &config.inillucent_target),
+        "tasks.jasonmcaffee.com" => (RouteClass::TasksBoard, &config.tasks_board_target),
         // Everything unrouted still lands on the personal site. That default used to point at
         // llama-server, which answered the public internet with the local model list, so a new arm
         // above it is always added with a test that proves this line has not moved.
@@ -205,6 +210,7 @@ mod tests {
             ("www.unluminous.com", RouteClass::UnluminousUi),
             ("inillucent.com", RouteClass::InillucentUi),
             ("www.inillucent.com", RouteClass::InillucentUi),
+            ("tasks.jasonmcaffee.com", RouteClass::TasksBoard),
             ("jasonmcaffee.com", RouteClass::PersonalSite),
             ("blog.jasonmcaffee.com", RouteClass::PersonalSite),
             ("unrelated.example", RouteClass::PersonalSite),
@@ -223,6 +229,7 @@ mod tests {
         assert_eq!(normalize_host("WWW.Unluminous.COM:80"), "www.unluminous.com");
         assert_eq!(normalize_host("WWW.Inillucent.COM:80"), "www.inillucent.com");
         assert_eq!(normalize_host("Inillucent.com."), "inillucent.com");
+        assert_eq!(normalize_host("Tasks.JasonMcAffee.COM:80"), "tasks.jasonmcaffee.com");
     }
 
     #[test]
@@ -237,6 +244,33 @@ mod tests {
         assert_eq!(route_request(&cfg, &host("blackrainbowlabs.com.evil.example"), "/").class, RouteClass::PersonalSite);
         assert_eq!(route_request(&cfg, &host("unluminous.com.evil.example"), "/").class, RouteClass::PersonalSite);
         assert_eq!(route_request(&cfg, &host("inillucent.com.evil.example"), "/").class, RouteClass::PersonalSite);
+        assert_eq!(route_request(&cfg, &host("tasks.jasonmcaffee.com.evil.example"), "/").class, RouteClass::PersonalSite);
+    }
+
+    #[test]
+    fn sends_the_tasks_host_to_the_board_with_its_path_untouched() {
+        // The board reads the path it was given — /tasks, /auth and /health — so nothing may be
+        // rewritten on the way in. And the board decides what a request arriving under this host
+        // name is allowed to do by reading the host name, so a decision here that dropped or
+        // replaced it would hand a public caller the privileges of a local one.
+        let cfg = config();
+        for path in ["/", "/health", "/auth/login", "/tasks/board?view=summary", "/tasks/2059/comments"] {
+            let decision = route_request(&cfg, &host("tasks.jasonmcaffee.com"), path);
+            assert_eq!(decision.class, RouteClass::TasksBoard, "{path}");
+            assert_eq!(decision.upstream_path, path, "{path}");
+            assert_eq!(decision.original_host, "tasks.jasonmcaffee.com", "{path}");
+            assert_eq!(decision.forwarded_host_override, None, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_shared_api_prefixes_still_win_over_the_tasks_host() {
+        // /ai-api and /news are matched before the host, and that ordering is deliberate. It means
+        // tasks.jasonmcaffee.com/ai-api/... reaches ai-service rather than the board, which is
+        // worth a test rather than a surprise: the board has no route under either prefix.
+        let cfg = config();
+        assert_eq!(route_request(&cfg, &host("tasks.jasonmcaffee.com"), "/ai-api/tasks/board").class, RouteClass::AiApi);
+        assert_eq!(route_request(&cfg, &host("tasks.jasonmcaffee.com"), "/news").class, RouteClass::News);
     }
 
     #[test]
