@@ -13,6 +13,13 @@ $env:PORT = '18080'
 node .\native-host.cjs
 ```
 
+**Deploying a new module is `pwsh tools/deploy.ps1`.** It builds the library, keeps the live
+`proxy_rs.node` as `proxy_rs.node.previous`, stops the service, swaps the file, starts it again, and
+then checks that the listener is ready and that three host names still route — including the unrouted
+catch-all, which is the arm a new host route is most likely to have broken. A failed check rolls back
+on its own; by hand it is `pwsh tools/deploy.ps1 -Rollback`. The blast radius is every public host
+name on this machine for the few seconds between the stop and the start, so it wants a quiet moment.
+
 Node loads the module and keeps its background Tokio runtime alive; it does not accept sockets or
 process request data. The listener, HTTP parsing, routing, header policy, streaming, upgrades,
 observability, and failure handling remain entirely in Rust. This arrangement uses the existing
