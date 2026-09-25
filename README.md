@@ -71,7 +71,13 @@ The Rust router evaluates segment-aware special paths first: `/ai-api` strips it
   from Phone Sync and never pass through the site's Node process. That prefix only means this on
   this one host; `/m/...` anywhere else is routed normally.
 - **jasonmcaffee.com** / **www.jasonmcaffee.com** (and any unrouted subdomain) → `localhost:3200`
-  (Jason McAffee personal site — Next.js, `C:jasondevai-servicejasonmcaffee-site`)
+  (Jason McAffee personal site, served by `brl-sites` from `C:\jason\dev\black-rainbow-labs-sites`)
+
+  Since task-2128 the four public sites (jasonmcaffee.com, blackrainbowlabs.com on 3400,
+  unluminous.com on 3500, inillucent.com on 3600) are served by Cloudflare Workers static assets
+  first. Only their `/videos/`, `/downloads/` and operational endpoints reach this proxy, through
+  Cloudflare's cache. The routes here are unchanged and are what serves the sites again if the
+  Worker routes are removed (`node tools/configure-edge.mjs <site> --remove-routes` in that repo).
 
   This default used to be `localhost:8080`, which is **llama-server**: until task-1559 the domain
   answered `https://jasonmcaffee.com/v1/models` with the local model list and an open completion
